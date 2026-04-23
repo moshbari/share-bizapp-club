@@ -818,6 +818,71 @@ const LANDING_CSS = `
   .guest-checkbox-label { flex: 1; font-weight: 500; color: #0f172a; font-size: 14px; }
   .guest-checkbox-hint { display: block; font-weight: 400; font-size: 13px; color: #64748b; margin-top: 2px; }
 
+  /* ---------- Animated rainbow progress bar ----------
+     Same shape as the /upload page but scaled up a touch since it's
+     the climactic moment on the landing flow — the user's first
+     interaction with the product, so worth the drama. */
+  .progress { display: none; margin-top: 16px; }
+  .progress.is-active { display: block; animation: progFade .25s ease-out; }
+  @keyframes progFade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+  .progress-pct {
+    font-size: 44px; font-weight: 700; line-height: 1;
+    letter-spacing: -0.02em; text-align: center; margin-bottom: 12px;
+    background: linear-gradient(90deg, #2563eb, #9333ea, #ec4899, #f97316);
+    background-size: 300% 100%;
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent; color: transparent;
+    animation: progHue 3s linear infinite;
+  }
+  @keyframes progHue { 0% { background-position: 0% 50%; } 100% { background-position: 100% 50%; } }
+
+  .progress-bar {
+    position: relative; height: 18px;
+    background: #e5e7eb; border-radius: 99px; overflow: hidden;
+    box-shadow: inset 0 1px 3px rgba(0,0,0,0.08);
+  }
+  .progress-fill {
+    position: relative; height: 100%; width: 0%; border-radius: 99px;
+    background: linear-gradient(90deg, #2563eb, #9333ea, #ec4899, #f97316);
+    background-size: 200% 100%;
+    animation: progSlide 2s linear infinite;
+    transition: width .25s cubic-bezier(.4,0,.2,1);
+    box-shadow: 0 0 14px rgba(147, 51, 234, 0.5);
+  }
+  @keyframes progSlide { 0% { background-position: 0% 0%; } 100% { background-position: 200% 0%; } }
+  /* Diagonal stripes overlay — keeps the bar feeling alive even when
+     the percentage isn't moving (e.g. during a server-side pause). */
+  .progress-fill::after {
+    content: ''; position: absolute; inset: 0; border-radius: 99px;
+    background-image: linear-gradient(45deg,
+      rgba(255,255,255,.25) 25%, transparent 25%,
+      transparent 50%, rgba(255,255,255,.25) 50%,
+      rgba(255,255,255,.25) 75%, transparent 75%, transparent);
+    background-size: 28px 28px;
+    animation: progStripes 1s linear infinite;
+  }
+  @keyframes progStripes { 0% { background-position: 0 0; } 100% { background-position: 28px 0; } }
+
+  .progress-meta {
+    display: flex; justify-content: space-between; gap: 12px;
+    font-size: 13px; color: #64748b; margin-top: 10px; flex-wrap: wrap;
+  }
+  .progress-meta strong { color: #0f172a; font-weight: 600; }
+
+  /* "Done!" state — green fill, gradient text turns solid green, stripes stop */
+  .progress.is-done .progress-fill {
+    animation: none;
+    background: linear-gradient(90deg, #16a34a, #22c55e);
+    box-shadow: 0 0 14px rgba(22, 163, 74, 0.5);
+  }
+  .progress.is-done .progress-fill::after { animation: none; opacity: 0; }
+  .progress.is-done .progress-pct {
+    animation: none;
+    background: none;
+    -webkit-text-fill-color: #16a34a; color: #16a34a;
+  }
+
   /* Summary card shown on the email stage */
   .summary-card {
     padding: 14px 16px;
