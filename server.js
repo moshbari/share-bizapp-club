@@ -17,9 +17,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 
-const { users: udb, files: fdb } = require('./lib/db');
+const { users: udb, files: fdb, passwordResets: prdb } = require('./lib/db');
 const users = require('./lib/users');
 const ghl = require('./lib/ghl');
+const email = require('./lib/email');
 const { classify, SIZE_CAPS, fmtBytes } = require('./lib/classify');
 const viewers = require('./lib/viewers');
 
@@ -392,6 +393,199 @@ app.get('/signup', (req, res) => {
   }));
 });
 
+// ---------- password reset ----------
+//
+// Flow:
+//   GET  /forgot           — email field
+//   POST /forgot           — generate token, email link, ALWAYS show generic
+//                            "check your email" success to avoid leaking
+//                            which emails are registered
+//   GET  /reset/:token     — validate token, show new-password form
+//   POST /reset/:token     — set new password, clear token
+//
+// The token stored in DB is sha256(raw). The link carries the raw token.
+
+function hashToken(raw) {
+  return crypto.createHash('sha256').update(String(raw)).digest('hex');
+}
+
+app.get('/forgot', (req, res) => {
+  const sent = req.query.sent === '1';
+  res.send(renderStandaloneAuthPage({
+    title: sent ? 'Check your inbox' : 'Forgot your password?',
+    subtitle: sent
+      ? `If an account exists for that email, we just sent a reset link. It expires in 24 hours.`
+      : `Enter your email and we'll send a link to set a new password. The link works once and expires in 24 hours.`,
+    body: sent ? `
+      <div class="auth-form">
+        <p class="auth-panel-sub" style="margin:0;">Didn't get anything after a minute? Check your spam folder, or request a fresh link.</p>
+      </div>
+      <p class="auth-switch"><a href="/forgot">Send another link</a> · <a href="/login">Back to sign in</a></p>
+    ` : `
+      <form method="POST" action="/forgot" class="auth-form" novalidate>
+        <div class="auth-field">
+          <label for="forgot-email">Email</label>
+          <input id="forgot-email" name="email" type="email" required autocomplete="email" autofocus placeholder="you@example.com">
+        </div>
+        <button type="submit" class="auth-submit">Email me a reset link <span class="auth-submit-arrow">→</span></button>
+      </form>
+      <p class="auth-switch">Remembered it? <a href="/login">Back to sign in</a></p>
+    `,
+  }));
+});
+
+app.post('/forgot', express.urlencoded({ extended: false }), async (req, res) => {
+  const emailAddr = (req.body.email || '').toLowerCase().trim();
+  // Always redirect to the generic "sent" page so an attacker can't tell
+  // whether the email is registered (account enumeration protection).
+  const done = () => res.redirect('/forgot?sent=1');
+
+  const row = udb.getByEmail(emailAddr);
+  if (!row) return done();
+  if (row.status === 'deactivated') return done();
+
+  try {
+    // Invalidate any previously-issued outstanding tokens so only the
+    // newest link works.
+    prdb.invalidateForUser(row.id);
+    prdb.sweep(); // Lazy cleanup — no cron needed at this scale.
+
+    const rawToken = crypto.randomBytes(32).toString('base64url');
+    const tokenHash = hashToken(rawToken);
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+      .replace('T', ' ').replace(/\..+$/, ''); // "YYYY-MM-DD HH:MM:SS" to match SQLite datetime()
+    prdb.create({ userId: row.id, tokenHash, expiresAt });
+
+    const resetUrl = `${PUBLIC_ORIGIN}/reset/${rawToken}`;
+
+    if (!email.isConfigured()) {
+      // Graceful degradation: without SMTP wired up, at least log the URL
+      // so an admin can deliver it out-of-band during initial rollout.
+      console.log(`[forgot] email not configured — reset url for ${emailAddr}: ${resetUrl}`);
+    } else {
+      try {
+        await email.sendPasswordResetEmail({
+          toEmail: row.email,
+          toName: row.name,
+          resetUrl,
+          siteName: SITE_NAME,
+        });
+        console.log(`[forgot] sent reset email to ${row.email}`);
+      } catch (err) {
+        console.error(`[forgot] send failed for ${row.email}:`, err.message);
+        // Still return generic success so enumeration protection holds.
+      }
+    }
+  } catch (err) {
+    console.error('[forgot] error:', err);
+  }
+  return done();
+});
+
+app.get('/reset/:token', (req, res) => {
+  const tokenHash = hashToken(req.params.token);
+  const row = prdb.getByHash(tokenHash);
+  const expired = !row || row.used_at || new Date(row.expires_at.replace(' ', 'T') + 'Z') < new Date();
+  if (expired) {
+    return res.send(renderStandaloneAuthPage({
+      title: 'Link expired or used',
+      subtitle: `Reset links work once and expire after 24 hours. Request a new one to continue.`,
+      body: `
+        <p class="auth-switch"><a href="/forgot">Request a new link</a> · <a href="/login">Back to sign in</a></p>
+      `,
+    }));
+  }
+  const err = req.query.err ? decodeURIComponent(req.query.err) : '';
+  res.send(renderStandaloneAuthPage({
+    title: 'Set a new password',
+    subtitle: `Pick something you'll remember. Minimum 8 characters.`,
+    body: `
+      <form method="POST" action="/reset/${escHtml(req.params.token)}" class="auth-form" novalidate>
+        <div class="auth-field">
+          <label for="reset-password">New password</label>
+          <input id="reset-password" name="password" type="password" required minlength="8" autocomplete="new-password" autofocus placeholder="At least 8 characters">
+        </div>
+        <div class="auth-field">
+          <label for="reset-confirm">Confirm new password</label>
+          <input id="reset-confirm" name="confirm" type="password" required minlength="8" autocomplete="new-password" placeholder="Re-type password">
+        </div>
+        <button type="submit" class="auth-submit">Update password <span class="auth-submit-arrow">→</span></button>
+        ${err ? `<div class="auth-error">${escHtml(err)}</div>` : ''}
+      </form>
+    `,
+  }));
+});
+
+app.post('/reset/:token', express.urlencoded({ extended: false }), (req, res) => {
+  const raw = req.params.token;
+  const tokenHash = hashToken(raw);
+  try {
+    const row = prdb.getByHash(tokenHash);
+    if (!row) throw new Error('Link is invalid.');
+    if (row.used_at) throw new Error('Link already used.');
+    if (new Date(row.expires_at.replace(' ', 'T') + 'Z') < new Date()) throw new Error('Link has expired.');
+
+    const { password, confirm } = req.body || {};
+    if (!password || password.length < 8) throw new Error('Password must be at least 8 characters.');
+    if (password !== confirm) throw new Error('Passwords do not match.');
+
+    udb.setPasswordHash(row.user_id, users.hashPassword(password));
+    prdb.markUsed(tokenHash);
+    // Invalidate any other outstanding tokens for this user too — belt
+    // and suspenders if multiple reset links were in flight.
+    prdb.invalidateForUser(row.user_id);
+    // Sign them in immediately so they don't have to type the fresh
+    // password they just set. Cleaner UX than bouncing back to /login.
+    setAuthCookie(res, row.user_id);
+    console.log(`[reset] user=${row.user_id} password updated via email token`);
+    return res.redirect('/upload');
+  } catch (err) {
+    return res.redirect('/reset/' + encodeURIComponent(raw) + '?err=' + encodeURIComponent(err.message));
+  }
+});
+
+// Small helper for pages that reuse the split-screen aesthetic but show
+// only a single panel (/forgot, /reset/:token, future /verify, etc.) —
+// no tab switcher since there's nothing to switch to.
+function renderStandaloneAuthPage({ title, subtitle, body }) {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>${escHtml(title)} — ${escHtml(SITE_NAME)}</title>
+  <meta name="robots" content="noindex,nofollow">
+  <style>${AUTH_CSS}</style>
+</head>
+<body class="auth-body">
+  <div class="auth-layout">
+    <aside class="auth-brand">
+      <div class="auth-brand-inner">
+        <a href="/" class="auth-logo">
+          <span class="auth-logo-mark">📤</span>
+          <span>${escHtml(SITE_NAME)}</span>
+        </a>
+        <h1 class="auth-hero">Share any file.<br>Skip the hassle.</h1>
+        <p class="auth-subtitle">
+          Drop an image, video, audio clip, PDF, or text file — get a share link with a
+          built-in viewer. Your recipients see it in their browser, no app needed.
+        </p>
+      </div>
+    </aside>
+    <main class="auth-main">
+      <div class="auth-card">
+        <section class="auth-panel">
+          <h2 class="auth-panel-title">${escHtml(title)}</h2>
+          <p class="auth-panel-sub">${escHtml(subtitle)}</p>
+          ${body}
+        </section>
+      </div>
+    </main>
+  </div>
+</body>
+</html>`;
+}
+
 // ---------- auth page renderer ----------
 //
 // Full-bleed split layout — gradient brand panel on the left, white auth
@@ -454,7 +648,10 @@ function renderAuthPage({ activeTab, loginErr, signupErr }) {
               <input id="login-email" name="email" type="email" required autocomplete="email" placeholder="you@example.com">
             </div>
             <div class="auth-field">
-              <label for="login-password">Password</label>
+              <label for="login-password" class="auth-label-row">
+                <span>Password</span>
+                <a href="/forgot" class="auth-forgot">Forgot?</a>
+              </label>
               <input id="login-password" name="password" type="password" required autocomplete="current-password" placeholder="••••••••">
             </div>
             <button type="submit" class="auth-submit">Sign in <span class="auth-submit-arrow">→</span></button>
@@ -620,6 +817,9 @@ const AUTH_CSS = `
   .auth-form { display: flex; flex-direction: column; gap: 16px; }
   .auth-field { display: flex; flex-direction: column; gap: 6px; }
   .auth-field label { font-size: 13px; font-weight: 600; color: #334155; }
+  .auth-label-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .auth-forgot { font-weight: 500; font-size: 12.5px; color: #64748b; text-decoration: none; }
+  .auth-forgot:hover { color: #2563eb; text-decoration: underline; }
   .auth-field input {
     padding: 11px 13px; font: inherit; font-size: 15px;
     border: 1px solid #e5e7eb; border-radius: 10px; background: #fff; color: #0f172a;
