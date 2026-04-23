@@ -363,27 +363,10 @@ app.get('/', (req, res) => {
 
 app.get('/login', (req, res) => {
   if (req.user) return res.redirect('/upload');
-  res.send(layout({
-    title: 'Log in — ' + SITE_NAME,
-    user: null,
-    body: `
-      <h1>Log in</h1>
-      <form class="card stack" method="POST" action="/login">
-        <div>
-          <label for="email">Email</label>
-          <input id="email" name="email" type="email" required autofocus autocomplete="email">
-        </div>
-        <div>
-          <label for="password">Password</label>
-          <input id="password" name="password" type="password" required autocomplete="current-password">
-        </div>
-        <button type="submit" class="btn btn-block">Log in</button>
-        ${req.query.err ? '<p class="err">Wrong email or password.</p>' : ''}
-        <p class="muted" style="margin: 0; text-align: center; font-size: 14px;">
-          No account? <a href="/signup">Sign up</a>
-        </p>
-      </form>
-    `,
+  res.send(renderAuthPage({
+    activeTab: 'login',
+    loginErr: req.query.err ? 'Wrong email or password.' : '',
+    signupErr: '',
   }));
 });
 
@@ -402,38 +385,271 @@ app.post('/logout', (req, res) => {
 app.get('/signup', (req, res) => {
   if (req.user) return res.redirect('/upload');
   const err = req.query.err ? decodeURIComponent(req.query.err) : '';
-  res.send(layout({
-    title: 'Sign up — ' + SITE_NAME,
-    user: null,
-    body: `
-      <h1>Create your account</h1>
-      <p class="muted">You'll start on a free trial — one file of each kind (image, video, audio, PDF, text) while we get you approved.</p>
-      <form class="card stack" method="POST" action="/signup">
-        <div>
-          <label for="name">Your name</label>
-          <input id="name" name="name" type="text" required autofocus autocomplete="name">
-        </div>
-        <div>
-          <label for="email">Email</label>
-          <input id="email" name="email" type="email" required autocomplete="email">
-        </div>
-        <div>
-          <label for="password">Password (min 8 chars)</label>
-          <input id="password" name="password" type="password" required minlength="8" autocomplete="new-password">
-        </div>
-        <div>
-          <label for="confirm">Confirm password</label>
-          <input id="confirm" name="confirm" type="password" required minlength="8" autocomplete="new-password">
-        </div>
-        <button type="submit" class="btn btn-block">Create account</button>
-        ${err ? `<p class="err">${escHtml(err)}</p>` : ''}
-        <p class="muted" style="margin: 0; text-align: center; font-size: 14px;">
-          Already have an account? <a href="/login">Log in</a>
-        </p>
-      </form>
-    `,
+  res.send(renderAuthPage({
+    activeTab: 'signup',
+    loginErr: '',
+    signupErr: err,
   }));
 });
+
+// ---------- auth page renderer ----------
+//
+// Full-bleed split layout — gradient brand panel on the left, white auth
+// card with Sign-in / Sign-up tabs on the right. Both forms ship in the
+// same page so the tab switch is instant; the server decides which tab
+// is visible on first paint based on the URL path (/login vs /signup).
+
+function renderAuthPage({ activeTab, loginErr, signupErr }) {
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>${activeTab === 'signup' ? 'Sign up' : 'Sign in'} — ${escHtml(SITE_NAME)}</title>
+  <meta name="robots" content="noindex,nofollow">
+  <style>${AUTH_CSS}</style>
+</head>
+<body class="auth-body">
+  <div class="auth-layout">
+    <aside class="auth-brand">
+      <div class="auth-brand-inner">
+        <a href="/" class="auth-logo" aria-label="${escHtml(SITE_NAME)} — home">
+          <span class="auth-logo-mark">📤</span>
+          <span>${escHtml(SITE_NAME)}</span>
+        </a>
+        <h1 class="auth-hero">Share any file.<br>Skip the hassle.</h1>
+        <p class="auth-subtitle">
+          Drop an image, video, audio clip, PDF, or text file — get a share link with a
+          built-in viewer. Your recipients see it in their browser, no app needed.
+        </p>
+        <ul class="auth-features">
+          <li><span class="auth-feat-icon">🎬</span> <div><strong>Stream & seek</strong><span>Video and audio play right in the browser with full controls.</span></div></li>
+          <li><span class="auth-feat-icon">📄</span> <div><strong>PDF viewer built in</strong><span>Page nav, zoom, search, and thumbnails — no download needed.</span></div></li>
+          <li><span class="auth-feat-icon">📝</span> <div><strong>Markdown & code</strong><span>Markdown renders nicely. Code files show as formatted text.</span></div></li>
+          <li><span class="auth-feat-icon">🔒</span> <div><strong>You control downloads</strong><span>Per-file toggle decides whether recipients can save a copy.</span></div></li>
+        </ul>
+        <div class="auth-footer-note">
+          Your files, your folder — connect your own GoHighLevel storage anytime.
+        </div>
+      </div>
+    </aside>
+
+    <main class="auth-main">
+      <div class="auth-card">
+        <div class="auth-tabs" role="tablist" aria-label="Authentication">
+          <button type="button" class="auth-tab${activeTab === 'login' ? ' is-active' : ''}"
+                  role="tab" aria-selected="${activeTab === 'login'}" data-tab="login"
+                  aria-controls="panel-login" id="tab-login">Sign in</button>
+          <button type="button" class="auth-tab${activeTab === 'signup' ? ' is-active' : ''}"
+                  role="tab" aria-selected="${activeTab === 'signup'}" data-tab="signup"
+                  aria-controls="panel-signup" id="tab-signup">Sign up</button>
+        </div>
+
+        <section id="panel-login" class="auth-panel${activeTab === 'login' ? '' : ' is-hidden'}" role="tabpanel" aria-labelledby="tab-login">
+          <h2 class="auth-panel-title">Welcome back</h2>
+          <p class="auth-panel-sub">Sign in to manage your shared files.</p>
+          <form method="POST" action="/login" class="auth-form" novalidate>
+            <div class="auth-field">
+              <label for="login-email">Email</label>
+              <input id="login-email" name="email" type="email" required autocomplete="email" placeholder="you@example.com">
+            </div>
+            <div class="auth-field">
+              <label for="login-password">Password</label>
+              <input id="login-password" name="password" type="password" required autocomplete="current-password" placeholder="••••••••">
+            </div>
+            <button type="submit" class="auth-submit">Sign in <span class="auth-submit-arrow">→</span></button>
+            ${loginErr ? `<div class="auth-error">${escHtml(loginErr)}</div>` : ''}
+          </form>
+          <p class="auth-switch">New here? <a href="/signup" data-tab-link="signup">Create an account</a></p>
+        </section>
+
+        <section id="panel-signup" class="auth-panel${activeTab === 'signup' ? '' : ' is-hidden'}" role="tabpanel" aria-labelledby="tab-signup">
+          <h2 class="auth-panel-title">Create your account</h2>
+          <p class="auth-panel-sub">Free trial — one file of each kind while we get you approved.</p>
+          <form method="POST" action="/signup" class="auth-form" novalidate>
+            <div class="auth-field">
+              <label for="signup-name">Your name</label>
+              <input id="signup-name" name="name" type="text" required autocomplete="name" placeholder="Alex Kim">
+            </div>
+            <div class="auth-field">
+              <label for="signup-email">Email</label>
+              <input id="signup-email" name="email" type="email" required autocomplete="email" placeholder="you@example.com">
+            </div>
+            <div class="auth-field">
+              <label for="signup-password">Password</label>
+              <input id="signup-password" name="password" type="password" required minlength="8" autocomplete="new-password" placeholder="At least 8 characters">
+            </div>
+            <div class="auth-field">
+              <label for="signup-confirm">Confirm password</label>
+              <input id="signup-confirm" name="confirm" type="password" required minlength="8" autocomplete="new-password" placeholder="Re-type password">
+            </div>
+            <button type="submit" class="auth-submit">Create account <span class="auth-submit-arrow">→</span></button>
+            ${signupErr ? `<div class="auth-error">${escHtml(signupErr)}</div>` : ''}
+          </form>
+          <p class="auth-switch">Already have an account? <a href="/login" data-tab-link="login">Sign in</a></p>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    (function () {
+      const tabs = document.querySelectorAll('.auth-tab');
+      const panels = {
+        login:  document.getElementById('panel-login'),
+        signup: document.getElementById('panel-signup'),
+      };
+      function activate(which) {
+        tabs.forEach(t => {
+          const isActive = t.dataset.tab === which;
+          t.classList.toggle('is-active', isActive);
+          t.setAttribute('aria-selected', String(isActive));
+        });
+        Object.entries(panels).forEach(([k, el]) => {
+          if (!el) return;
+          el.classList.toggle('is-hidden', k !== which);
+        });
+        // Update the URL (and page title) without a reload so bookmarks + the
+        // back button behave naturally.
+        try {
+          history.replaceState(null, '', which === 'signup' ? '/signup' : '/login');
+          document.title = (which === 'signup' ? 'Sign up' : 'Sign in') + ' — ' + ${JSON.stringify(SITE_NAME)};
+        } catch (_) {}
+        // Focus the first empty field for smoother UX.
+        const firstInput = panels[which].querySelector('input:not([type="hidden"])');
+        if (firstInput) setTimeout(() => firstInput.focus(), 50);
+      }
+      tabs.forEach(t => t.addEventListener('click', () => activate(t.dataset.tab)));
+      document.querySelectorAll('[data-tab-link]').forEach(a => {
+        a.addEventListener('click', (e) => { e.preventDefault(); activate(a.dataset.tabLink); });
+      });
+    })();
+  </script>
+</body>
+</html>`;
+}
+
+const AUTH_CSS = `
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  .auth-body { font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif; color: #0f172a; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; background: #fff; }
+
+  .auth-layout { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); min-height: 100vh; }
+  @media (max-width: 960px) { .auth-layout { grid-template-columns: 1fr; } }
+
+  /* ---------- LEFT: brand + marketing ---------- */
+  .auth-brand {
+    position: relative; overflow: hidden;
+    background:
+      radial-gradient(1200px 600px at -10% -20%, rgba(99,102,241,0.35) 0%, transparent 60%),
+      radial-gradient(900px 500px at 110% 120%, rgba(236,72,153,0.30) 0%, transparent 60%),
+      linear-gradient(135deg, #0b1220 0%, #0f172a 50%, #1a2540 100%);
+    color: #fff;
+    padding: 56px 48px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .auth-brand::before {
+    content: ""; position: absolute; inset: 0;
+    background-image:
+      linear-gradient(rgba(255,255,255,0.04) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.04) 1px, transparent 1px);
+    background-size: 48px 48px;
+    -webkit-mask-image: radial-gradient(ellipse at center, rgba(0,0,0,0.6), transparent 70%);
+            mask-image: radial-gradient(ellipse at center, rgba(0,0,0,0.6), transparent 70%);
+    pointer-events: none;
+  }
+  .auth-brand-inner { position: relative; z-index: 1; max-width: 500px; width: 100%; }
+  .auth-logo { display: inline-flex; align-items: center; gap: 10px; color: #fff; text-decoration: none; font-weight: 700; font-size: 17px; letter-spacing: -0.01em; margin-bottom: 56px; opacity: 0.95; }
+  .auth-logo:hover { opacity: 1; }
+  .auth-logo-mark { font-size: 22px; line-height: 1; }
+
+  .auth-hero {
+    font-size: clamp(30px, 4vw, 44px);
+    line-height: 1.08; letter-spacing: -0.03em; font-weight: 700;
+    margin: 0 0 18px;
+    background: linear-gradient(180deg, #ffffff 0%, #cbd5e1 100%);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent; color: transparent;
+  }
+  .auth-subtitle { font-size: 16.5px; line-height: 1.55; color: rgba(226,232,240,0.82); margin: 0 0 36px; max-width: 44ch; }
+
+  .auth-features { list-style: none; padding: 0; margin: 0 0 36px; display: flex; flex-direction: column; gap: 14px; }
+  .auth-features li { display: flex; align-items: flex-start; gap: 14px; padding: 14px 16px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 14px; backdrop-filter: blur(6px); }
+  .auth-feat-icon { font-size: 20px; line-height: 1.2; flex: 0 0 auto; width: 36px; height: 36px; display: inline-flex; align-items: center; justify-content: center; background: rgba(255,255,255,0.06); border-radius: 10px; border: 1px solid rgba(255,255,255,0.08); }
+  .auth-features li > div { display: flex; flex-direction: column; gap: 2px; }
+  .auth-features li strong { font-size: 14px; font-weight: 600; color: #fff; }
+  .auth-features li span { font-size: 13px; color: rgba(226,232,240,0.7); line-height: 1.4; }
+
+  .auth-footer-note { font-size: 13px; color: rgba(226,232,240,0.55); padding-top: 20px; border-top: 1px solid rgba(255,255,255,0.08); }
+
+  @media (max-width: 960px) {
+    .auth-brand { padding: 40px 24px; }
+    .auth-logo { margin-bottom: 32px; }
+    .auth-features { gap: 10px; margin-bottom: 24px; }
+  }
+
+  /* ---------- RIGHT: auth card ---------- */
+  .auth-main { display: flex; align-items: center; justify-content: center; padding: 56px 24px; background: linear-gradient(180deg, #fafbff 0%, #f3f5fb 100%); }
+  .auth-card {
+    width: 100%; max-width: 460px;
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 20px;
+    padding: 36px 32px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 20px 50px -20px rgba(15,23,42,0.14);
+  }
+  @media (max-width: 480px) { .auth-card { padding: 28px 22px; border-radius: 16px; } }
+
+  .auth-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; padding: 4px; background: #f1f5f9; border-radius: 12px; margin-bottom: 28px; }
+  .auth-tab {
+    padding: 10px 14px; border: 0; background: transparent;
+    font: inherit; font-size: 14px; font-weight: 600; color: #64748b;
+    cursor: pointer; border-radius: 9px; transition: background-color .18s, color .18s, box-shadow .18s;
+  }
+  .auth-tab:hover { color: #0f172a; }
+  .auth-tab.is-active { background: #fff; color: #0f172a; box-shadow: 0 1px 2px rgba(15,23,42,0.08), 0 1px 3px rgba(15,23,42,0.04); }
+  .auth-tab:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
+
+  .auth-panel { animation: authFade .25s ease-out; }
+  .auth-panel.is-hidden { display: none; }
+  @keyframes authFade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
+
+  .auth-panel-title { margin: 0 0 4px; font-size: 24px; font-weight: 700; letter-spacing: -0.02em; color: #0f172a; }
+  .auth-panel-sub { margin: 0 0 24px; font-size: 14px; color: #64748b; line-height: 1.45; }
+
+  .auth-form { display: flex; flex-direction: column; gap: 16px; }
+  .auth-field { display: flex; flex-direction: column; gap: 6px; }
+  .auth-field label { font-size: 13px; font-weight: 600; color: #334155; }
+  .auth-field input {
+    padding: 11px 13px; font: inherit; font-size: 15px;
+    border: 1px solid #e5e7eb; border-radius: 10px; background: #fff; color: #0f172a;
+    transition: border-color .15s, box-shadow .15s, background-color .15s;
+  }
+  .auth-field input::placeholder { color: #94a3b8; }
+  .auth-field input:hover { border-color: #cbd5e1; }
+  .auth-field input:focus { outline: 0; border-color: #2563eb; box-shadow: 0 0 0 4px rgba(37,99,235,0.12); }
+
+  .auth-submit {
+    margin-top: 8px;
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    padding: 12px 16px; min-height: 48px;
+    border: 0; border-radius: 10px; cursor: pointer;
+    font: inherit; font-size: 15px; font-weight: 600; color: #fff;
+    background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
+    box-shadow: 0 1px 2px rgba(29,78,216,0.2), 0 6px 18px -6px rgba(29,78,216,0.5);
+    transition: transform .1s, box-shadow .15s, filter .15s;
+  }
+  .auth-submit:hover { filter: brightness(1.05); box-shadow: 0 2px 4px rgba(29,78,216,0.22), 0 10px 24px -6px rgba(29,78,216,0.55); }
+  .auth-submit:active { transform: translateY(1px); }
+  .auth-submit-arrow { transition: transform .15s; }
+  .auth-submit:hover .auth-submit-arrow { transform: translateX(2px); }
+
+  .auth-error { margin-top: 4px; padding: 10px 12px; background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; border-radius: 10px; font-size: 13.5px; }
+
+  .auth-switch { margin: 20px 0 0; text-align: center; font-size: 14px; color: #64748b; }
+  .auth-switch a { color: #2563eb; font-weight: 600; text-decoration: none; }
+  .auth-switch a:hover { text-decoration: underline; }
+`;
 
 app.post('/signup', express.urlencoded({ extended: false }), (req, res) => {
   try {
