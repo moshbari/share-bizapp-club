@@ -359,7 +359,11 @@ function renderRecentCard(r) {
 
 app.get('/', (req, res) => {
   if (req.user) return res.redirect('/upload');
-  return res.redirect('/login');
+  // Send first-time visitors to the Start Free tab rather than the sign-in
+  // form. The auth page renders both tabs; /signup just picks which is
+  // active on first paint. Existing users still see a prominent "Sign in"
+  // tab right next to it.
+  return res.redirect('/signup');
 });
 
 app.get('/login', (req, res) => {
@@ -611,10 +615,15 @@ function renderAuthPage({ activeTab, loginErr, signupErr }) {
           <span class="auth-logo-mark">📤</span>
           <span>${escHtml(SITE_NAME)}</span>
         </a>
+        <span class="auth-eyebrow">
+          <span class="auth-eyebrow-dot"></span>
+          FREE to start — no credit card
+        </span>
         <h1 class="auth-hero">Share any file.<br>Skip the hassle.</h1>
         <p class="auth-subtitle">
           Drop an image, video, audio clip, PDF, or text file — get a share link with a
           built-in viewer. Your recipients see it in their browser, no app needed.
+          <strong style="color:#fff;">Start free in 30 seconds.</strong>
         </p>
         <ul class="auth-features">
           <li><span class="auth-feat-icon">🎬</span> <div><strong>Stream & seek</strong><span>Video and audio play right in the browser with full controls.</span></div></li>
@@ -636,7 +645,7 @@ function renderAuthPage({ activeTab, loginErr, signupErr }) {
                   aria-controls="panel-login" id="tab-login">Sign in</button>
           <button type="button" class="auth-tab${activeTab === 'signup' ? ' is-active' : ''}"
                   role="tab" aria-selected="${activeTab === 'signup'}" data-tab="signup"
-                  aria-controls="panel-signup" id="tab-signup">Sign up</button>
+                  aria-controls="panel-signup" id="tab-signup">Start Free <span class="auth-tab-badge">FREE</span></button>
         </div>
 
         <section id="panel-login" class="auth-panel${activeTab === 'login' ? '' : ' is-hidden'}" role="tabpanel" aria-labelledby="tab-login">
@@ -661,8 +670,8 @@ function renderAuthPage({ activeTab, loginErr, signupErr }) {
         </section>
 
         <section id="panel-signup" class="auth-panel${activeTab === 'signup' ? '' : ' is-hidden'}" role="tabpanel" aria-labelledby="tab-signup">
-          <h2 class="auth-panel-title">Create your account</h2>
-          <p class="auth-panel-sub">Free trial — one file of each kind while we get you approved.</p>
+          <h2 class="auth-panel-title">Start sharing — free</h2>
+          <p class="auth-panel-sub">No credit card. 5 uploads to try everything. Upgrade only when you're ready.</p>
           <form method="POST" action="/signup" class="auth-form" novalidate>
             <div class="auth-field">
               <label for="signup-name">Your name</label>
@@ -680,7 +689,12 @@ function renderAuthPage({ activeTab, loginErr, signupErr }) {
               <label for="signup-confirm">Confirm password</label>
               <input id="signup-confirm" name="confirm" type="password" required minlength="8" autocomplete="new-password" placeholder="Re-type password">
             </div>
-            <button type="submit" class="auth-submit">Create account <span class="auth-submit-arrow">→</span></button>
+            <button type="submit" class="auth-submit auth-submit--cta">Start Sharing FREE <span class="auth-submit-arrow">→</span></button>
+            <ul class="auth-trust">
+              <li><span class="auth-trust-check">✓</span> No credit card</li>
+              <li><span class="auth-trust-check">✓</span> 5 free uploads</li>
+              <li><span class="auth-trust-check">✓</span> 30-second setup</li>
+            </ul>
             ${signupErr ? `<div class="auth-error">${escHtml(signupErr)}</div>` : ''}
           </form>
           <p class="auth-switch">Already have an account? <a href="/login" data-tab-link="login">Sign in</a></p>
@@ -756,9 +770,30 @@ const AUTH_CSS = `
     pointer-events: none;
   }
   .auth-brand-inner { position: relative; z-index: 1; max-width: 500px; width: 100%; }
-  .auth-logo { display: inline-flex; align-items: center; gap: 10px; color: #fff; text-decoration: none; font-weight: 700; font-size: 17px; letter-spacing: -0.01em; margin-bottom: 56px; opacity: 0.95; }
+  .auth-logo { display: inline-flex; align-items: center; gap: 10px; color: #fff; text-decoration: none; font-weight: 700; font-size: 17px; letter-spacing: -0.01em; margin-bottom: 40px; opacity: 0.95; }
   .auth-logo:hover { opacity: 1; }
   .auth-logo-mark { font-size: 22px; line-height: 1; }
+
+  /* Green "FREE to start" eyebrow pill — pops against the dark brand panel. */
+  .auth-eyebrow {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 6px 14px;
+    background: rgba(34, 197, 94, 0.14);
+    border: 1px solid rgba(34, 197, 94, 0.38);
+    border-radius: 99px;
+    font-size: 12.5px; font-weight: 600; letter-spacing: 0.04em;
+    color: #86efac; text-transform: uppercase;
+    margin-bottom: 18px;
+  }
+  .auth-eyebrow-dot {
+    width: 8px; height: 8px; background: #22c55e; border-radius: 50%;
+    box-shadow: 0 0 0 3px rgba(34,197,94,0.3);
+    animation: eyebrowPulse 2s ease-in-out infinite;
+  }
+  @keyframes eyebrowPulse {
+    0%, 100% { box-shadow: 0 0 0 3px rgba(34,197,94,0.3); }
+    50%      { box-shadow: 0 0 0 6px rgba(34,197,94,0.12); }
+  }
 
   .auth-hero {
     font-size: clamp(30px, 4vw, 44px);
@@ -807,6 +842,17 @@ const AUTH_CSS = `
   .auth-tab.is-active { background: #fff; color: #0f172a; box-shadow: 0 1px 2px rgba(15,23,42,0.08), 0 1px 3px rgba(15,23,42,0.04); }
   .auth-tab:focus-visible { outline: 2px solid #2563eb; outline-offset: 2px; }
 
+  /* Tiny green "FREE" pill inside the Start Free tab. Visible on both the
+     active and inactive state — even on /login it reminds visitors signup
+     is free. */
+  .auth-tab-badge {
+    display: inline-block; margin-left: 6px; padding: 2px 6px;
+    background: #16a34a; color: #fff;
+    font-size: 9.5px; font-weight: 700; letter-spacing: 0.06em;
+    border-radius: 4px; vertical-align: middle;
+    box-shadow: 0 1px 2px rgba(22,163,74,0.3);
+  }
+
   .auth-panel { animation: authFade .25s ease-out; }
   .auth-panel.is-hidden { display: none; }
   @keyframes authFade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
@@ -843,6 +889,24 @@ const AUTH_CSS = `
   .auth-submit:active { transform: translateY(1px); }
   .auth-submit-arrow { transition: transform .15s; }
   .auth-submit:hover .auth-submit-arrow { transform: translateX(2px); }
+
+  /* Emphasis variant for the signup CTA — green gradient so it reads as
+     "start free" instead of generic "submit". */
+  .auth-submit--cta {
+    background: linear-gradient(180deg, #22c55e 0%, #16a34a 100%);
+    box-shadow: 0 1px 2px rgba(22,163,74,0.22), 0 8px 20px -6px rgba(22,163,74,0.55);
+    font-size: 16px; min-height: 52px; letter-spacing: 0.01em;
+  }
+  .auth-submit--cta:hover { box-shadow: 0 2px 4px rgba(22,163,74,0.24), 0 12px 26px -6px rgba(22,163,74,0.6); }
+
+  /* Trust bullets under the Start Free CTA. */
+  .auth-trust {
+    list-style: none; padding: 0; margin: 12px 0 0;
+    display: flex; gap: 14px; flex-wrap: wrap; justify-content: center;
+    font-size: 12.5px; color: #64748b;
+  }
+  .auth-trust li { display: inline-flex; align-items: center; gap: 5px; }
+  .auth-trust-check { color: #16a34a; font-weight: 700; }
 
   .auth-error { margin-top: 4px; padding: 10px 12px; background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; border-radius: 10px; font-size: 13.5px; }
 
