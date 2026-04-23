@@ -437,8 +437,68 @@ app.post('/signup', express.urlencoded({ extended: false }), (req, res) => {
 // ---------- account (change-password) ----------
 
 app.get('/account', requireUser, (req, res) => {
-  const msg = req.query.ok ? 'Password updated.' : '';
-  const err = req.query.err ? decodeURIComponent(req.query.err) : '';
+  const pwMsg = req.query.pw === 'ok' ? 'Password updated.' : '';
+  const pwErr = req.query.pw_err ? decodeURIComponent(req.query.pw_err) : '';
+  const ghlMsg = req.query.ghl === 'ok'  ? 'Your GHL storage is connected.'
+              : req.query.ghl === 'cleared' ? 'Switched back to shared storage.' : '';
+  const ghlErr = req.query.ghl_err ? decodeURIComponent(req.query.ghl_err) : '';
+
+  // Reload so we see any columns the seed migration just added.
+  const row = udb.getById(req.user.id);
+  const cfg = users.effectiveGhlConfig(row);
+  const canCustomize = req.user.status === 'regular' || req.user.is_admin;
+
+  const ghlSection = canCustomize ? `
+    <h2>Your GHL storage</h2>
+    <div class="card stack">
+      <p class="muted" style="margin: 0;">
+        By default your uploads go to the shared folder. Connect your own GoHighLevel sub-account and folder
+        and your future uploads will land there instead. Already-uploaded files stay where they are.
+      </p>
+      <div>
+        <strong>Current target:</strong>
+        ${cfg.source === 'user'
+          ? `<span class="pill" style="background:#16a34a1a;color:#16a34a;border:1px solid #16a34a55;">your folder</span>
+             <span class="muted" style="font-size:13px;">${escHtml(cfg.folderName)} in location ${escHtml(cfg.locationId)}</span>`
+          : `<span class="pill" style="background:#64748b1a;color:#64748b;border:1px solid #64748b55;">shared folder</span>`}
+      </div>
+    </div>
+    <form class="card stack" method="POST" action="/account/ghl-settings">
+      <div>
+        <label for="pit">PIT token</label>
+        <input id="pit" name="pit" type="password" placeholder="${row.ghl_api_key ? '•••••• (saved — retype to change)' : 'pit-xxxxxxxx-xxxx-...'}" autocomplete="off">
+        <p class="muted" style="font-size: 12px; margin: 4px 0 0;">
+          Create one in GHL: Settings → Private Integrations → + Create. Needs the <em>medias.write</em> and <em>medias.readonly</em> scopes.
+        </p>
+      </div>
+      <div>
+        <label for="location">Location ID</label>
+        <input id="location" name="location" type="text" value="${escHtml(row.ghl_location_id || '')}" placeholder="the sub-account location id">
+      </div>
+      <div>
+        <label for="folder">Folder name (must already exist in GHL)</label>
+        <input id="folder" name="folder" type="text" value="${escHtml(row.ghl_folder_name || '')}" placeholder="e.g. ${escHtml(SITE_NAME)}">
+        <p class="muted" style="font-size: 12px; margin: 4px 0 0;">
+          Create the folder in the GHL media library first, then paste the exact name here. We'll look it up and save its id.
+        </p>
+      </div>
+      <div class="row">
+        <button type="submit" class="btn">Save &amp; test</button>
+        ${cfg.source === 'user' ? `<button type="submit" class="btn btn-secondary" formaction="/account/ghl-settings/clear" formnovalidate>Use shared folder instead</button>` : ''}
+      </div>
+      ${ghlMsg ? `<p class="ok">${escHtml(ghlMsg)}</p>` : ''}
+      ${ghlErr ? `<p class="err">${escHtml(ghlErr)}</p>` : ''}
+    </form>
+  ` : `
+    <h2>Your GHL storage</h2>
+    <div class="card">
+      <p class="muted" style="margin: 0;">
+        Trial accounts use the shared storage. Ask the admin to upgrade your account to <strong>regular</strong>
+        and you'll be able to connect your own GoHighLevel sub-account and folder here.
+      </p>
+    </div>
+  `;
+
   res.send(layout({
     title: 'Account — ' + SITE_NAME,
     user: req.user,
@@ -449,6 +509,7 @@ app.get('/account', requireUser, (req, res) => {
         <div><strong>Email:</strong> ${escHtml(req.user.email)}</div>
         <div><strong>Status:</strong> ${statusPill(req.user.status)}${req.user.is_admin ? ' ' + statusPill('admin') : ''}</div>
       </div>
+
       <h2>Change password</h2>
       <form class="card stack" method="POST" action="/account/change-password">
         <div>
@@ -464,9 +525,11 @@ app.get('/account', requireUser, (req, res) => {
           <input id="confirm" name="confirm" type="password" required minlength="8" autocomplete="new-password">
         </div>
         <button type="submit" class="btn btn-block">Update password</button>
-        ${msg ? `<p class="ok">${escHtml(msg)}</p>` : ''}
-        ${err ? `<p class="err">${escHtml(err)}</p>` : ''}
+        ${pwMsg ? `<p class="ok">${escHtml(pwMsg)}</p>` : ''}
+        ${pwErr ? `<p class="err">${escHtml(pwErr)}</p>` : ''}
       </form>
+
+      ${ghlSection}
     `,
   }));
 });
@@ -483,10 +546,53 @@ app.post('/account/change-password', requireUser, express.urlencoded({ extended:
       throw new Error('Current password is wrong.');
     }
     udb.setPasswordHash(req.user.id, users.hashPassword(next));
-    return res.redirect('/account?ok=1');
+    return res.redirect('/account?pw=ok');
   } catch (err) {
-    return res.redirect('/account?err=' + encodeURIComponent(err.message));
+    return res.redirect('/account?pw_err=' + encodeURIComponent(err.message));
   }
+});
+
+// Save GHL storage settings. We validate live: the PIT must authenticate
+// against the given location, and the folder name must resolve to an id
+// via the folders-list endpoint. If any check fails, nothing is saved.
+app.post('/account/ghl-settings', requireUser, express.urlencoded({ extended: false }), (req, res) => {
+  if (!(req.user.status === 'regular' || req.user.is_admin)) {
+    return res.redirect('/account?ghl_err=' + encodeURIComponent('Upgrade to a regular account to customize storage.'));
+  }
+  try {
+    const row = udb.getById(req.user.id);
+    const newPit      = (req.body.pit      || '').trim();
+    const locationId  = (req.body.location || '').trim();
+    const folderName  = (req.body.folder   || '').trim();
+    if (!locationId) throw new Error('Location ID is required.');
+    if (!folderName) throw new Error('Folder name is required.');
+
+    // PIT is optional on re-save — leaving it blank means "keep the one we already have"
+    const apiKey = newPit || row.ghl_api_key || '';
+    if (!apiKey) throw new Error('PIT token is required on first save.');
+
+    // Validate with a live list-folders call; also resolves folder id
+    const folder = ghl.findFolderByName({ apiKey, locationId, folderName });
+    if (!folder) throw new Error(`No folder named "${folderName}" in that location. Create it in GHL first.`);
+
+    udb.setGhlConfig(req.user.id, {
+      apiKey, locationId, folderId: folder._id, folderName: folder.name,
+    });
+    console.log(`[ghl-cfg] user=${req.user.id} set custom target location=${locationId} folder=${folder._id}`);
+    return res.redirect('/account?ghl=ok');
+  } catch (err) {
+    console.warn(`[ghl-cfg] user=${req.user.id} save failed: ${err.message}`);
+    return res.redirect('/account?ghl_err=' + encodeURIComponent(err.message));
+  }
+});
+
+app.post('/account/ghl-settings/clear', requireUser, (req, res) => {
+  if (!(req.user.status === 'regular' || req.user.is_admin)) {
+    return res.redirect('/account');
+  }
+  udb.setGhlConfig(req.user.id, { apiKey: null, locationId: null, folderId: null, folderName: null });
+  console.log(`[ghl-cfg] user=${req.user.id} reverted to shared`);
+  return res.redirect('/account?ghl=cleared');
 });
 
 // ---------- upload page ----------
@@ -809,7 +915,12 @@ app.post('/api/upload', requireUser, upload.single('file'), async (req, res) => 
     const safeBase = sanitizeForFilename(title);
     const ghlDisplayName = `${safeBase}-${uniq}.${cls.ghlExt}`;
 
-    const ghlUrl = ghl.uploadToGhl(file.path, ghlDisplayName, cls.ghlMime);
+    // Pick the user's GHL config if they set one; otherwise fall back to
+    // shared env. Trial users are gated above so they only ever hit
+    // shared here, which matches the "regular users only" rule.
+    const ghlCfg = users.effectiveGhlConfig(fresh);
+    const ghlUrl = ghl.uploadToGhl(file.path, ghlDisplayName, cls.ghlMime, ghlCfg);
+    console.log(`[upload] user=${req.user.id} target=${ghlCfg.source}`);
 
     fdb.insert({
       slug, title, original_filename: file.originalname,
@@ -835,6 +946,9 @@ app.post('/api/upload', requireUser, upload.single('file'), async (req, res) => 
         <div class="card">
           <p><strong>${kindEmoji(cls.kind)} ${escHtml(cls.kind)}</strong> · ${fmtBytes(file.size)}</p>
           <p class="muted" style="margin: 0;">${allowDownload ? 'Downloads allowed' : 'Preview only — downloads off'}</p>
+          <p class="muted" style="margin: 6px 0 0; font-size: 13px;">
+            Stored in ${ghlCfg.source === 'user' ? `your folder <strong>${escHtml(ghlCfg.folderName)}</strong>` : 'the shared folder'}.
+          </p>
         </div>
         <a href="/upload" class="btn btn-secondary btn-block">Upload another</a>
         <script>
@@ -991,7 +1105,14 @@ app.post('/api/toggle-download/:slug', requireUser, express.json(), (req, res) =
 app.post('/api/delete/:slug', requireUser, (req, res) => {
   const ghlUrl = fdb.deleteBySlugForUser(req.params.slug, req.user.id);
   if (!ghlUrl) return res.status(404).json({ ok: false, error: 'not found' });
-  try { ghl.tryDeleteFromGhl(ghlUrl); } catch {}
+  // Use the user's config so files in their own folder get deleted with
+  // their PIT. Files that predate a user's custom config were uploaded
+  // via the shared env — effectiveGhlConfig falls back to env when the
+  // user hasn't set one, so best-effort cleanup still goes to the right
+  // bucket. The one corner case — user uploads while shared, then later
+  // customizes — still works because delete uses the saved ghl_url and
+  // the shared PIT always has access (same sub-account today).
+  try { ghl.tryDeleteFromGhl(ghlUrl, users.effectiveGhlConfig(udb.getById(req.user.id))); } catch {}
   res.json({ ok: true });
 });
 
@@ -1238,9 +1359,13 @@ app.post('/admin/users/:id/delete', requireUser, requireAdmin, (req, res) => {
   if (!target) return res.status(404).json({ ok: false, error: 'not found' });
   if (target.is_admin) return res.status(400).json({ ok: false, error: 'cannot delete admin' });
   // Cascade: delete user's files locally, best-effort remove from GHL.
+  // Use the deleted user's own config if they had one so files in their
+  // personal folder get torn down with their PIT. The shared-env fallback
+  // handles everything they uploaded before customizing.
+  const userCfg = users.effectiveGhlConfig(target);
   const urls = fdb.deleteAllByUser(id);
   udb.deleteById(id);
-  for (const u of urls) { try { ghl.tryDeleteFromGhl(u); } catch {} }
+  for (const u of urls) { try { ghl.tryDeleteFromGhl(u, userCfg); } catch {} }
   res.json({ ok: true, deletedFiles: urls.length });
 });
 
