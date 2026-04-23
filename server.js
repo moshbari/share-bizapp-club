@@ -633,15 +633,17 @@ app.get('/upload', requireUser, (req, res) => {
   const nextCursor = firstPage.length === RECENT_PAGE_SIZE
     ? firstPage[firstPage.length - 1].id : null;
 
-  // Filter bar is rendered unconditionally whenever the user has *any*
-  // files, so they can narrow the list as it grows. When there are no
-  // files yet, we skip the whole block — filtering an empty list is just
-  // noise.
+  // Always render the recent-list scaffolding — heading, filter bar, list
+  // container, sentinel. That way the RECENT_LIST_JS IIFE always binds its
+  // 'recent:refresh' listener, and a first-upload populates the list live
+  // without needing a reload. The list + filter bar stay hidden visually
+  // until there's at least one file to show (toggled client-side by the
+  // refresh handler).
   const hasAnyFiles = firstPage.length > 0;
 
-  const recentHtml = !hasAnyFiles ? '' : `
-    <h2>Your recent shares</h2>
-    <div class="filter-bar">
+  const recentHtml = `
+    <h2 id="recent-heading"${hasAnyFiles ? '' : ' style="display:none;"'}>Your recent shares</h2>
+    <div class="filter-bar" id="filter-bar"${hasAnyFiles ? '' : ' style="display:none;"'}>
       <div class="filter-chips">
         <button class="chip-btn is-active" type="button" data-kind="all">All</button>
         <button class="chip-btn" type="button" data-kind="image">🖼 Images</button>
@@ -792,7 +794,10 @@ app.get('/upload', requireUser, (req, res) => {
           const fd = new FormData(form);
           const xhr = new XMLHttpRequest();
           xhr.open('POST', '/api/upload');
-          xhr.responseType = 'document';
+          // NOTE: do NOT set responseType = 'document'. Accessing responseText
+          // on a document response throws InvalidStateError, which used to
+          // crash mid-render after document.open() had already blanked the
+          // page. We now parse JSON and render the success state in place.
 
           const startedAt = performance.now();
           let lastTime = startedAt, lastLoaded = 0, smoothedBps = 0;
@@ -815,19 +820,27 @@ app.get('/upload', requireUser, (req, res) => {
             progressEta.textContent = fmtEta(remaining);
           });
           xhr.addEventListener('load', () => {
-            if (xhr.status >= 200 && xhr.status < 300 && xhr.responseXML) {
+            let data = null;
+            try { data = JSON.parse(xhr.responseText); } catch (_) {}
+
+            if (xhr.status >= 200 && xhr.status < 300 && data && data.ok) {
+              // Animate progress to 100% so the user sees completion.
               progressFill.style.width = '100%';
               progressPct.textContent = '100%';
               progressEta.textContent = 'Done!';
               progress.classList.add('is-done');
-              setTimeout(() => { document.open(); document.write(xhr.responseText); document.close(); }, 350);
+              setTimeout(() => {
+                showUploadSuccess(data);
+                resetUploadForm();
+                // Ask the recent list (if present) to refresh so the new
+                // file shows up at the top without a page reload.
+                document.dispatchEvent(new CustomEvent('recent:refresh'));
+              }, 350);
             } else {
               btn.disabled = false; btn.textContent = 'Upload and make link';
               progress.classList.remove('is-active');
-              // Try to surface the server's text body on error
-              let msg = 'Upload failed: ' + (xhr.status || 'network error');
-              try { const t = xhr.response?.body?.innerText?.trim(); if (t) msg = t.slice(0, 200); } catch {}
-              errMsg.textContent = msg; errMsg.style.display = 'block';
+              errMsg.textContent = (data && data.error) || ('Upload failed: ' + (xhr.status || 'network error'));
+              errMsg.style.display = 'block';
             }
           });
           xhr.addEventListener('error', () => {
@@ -839,6 +852,64 @@ app.get('/upload', requireUser, (req, res) => {
           progress.classList.add('is-active');
           xhr.send(fd);
         });
+
+        // ---- In-place success UI ----
+        // A single success card per session is reused — if the user uploads
+        // several files in a row, the card updates instead of stacking.
+        function escText(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+        function showUploadSuccess(d) {
+          let card = document.getElementById('upload-success');
+          if (!card) {
+            card = document.createElement('div');
+            card.id = 'upload-success';
+            card.className = 'card stack';
+            card.style.borderLeft = '4px solid var(--ok)';
+            form.parentNode.insertBefore(card, form);
+          }
+          const storage = d.storageSource === 'user'
+            ? 'your folder <strong>' + escText(d.folderName) + '</strong>'
+            : 'the shared folder';
+          card.innerHTML =
+            '<h2 class="ok" style="margin:0 0 4px;">✅ Link ready</h2>' +
+            '<p class="muted" style="margin:0;">' + escText(d.title) + '</p>' +
+            '<div class="link-box" style="word-break:break-all;">' + escText(d.shareLink) + '</div>' +
+            '<div class="row">' +
+              '<button type="button" class="btn" data-role="copy">Copy link</button>' +
+              '<a class="btn btn-secondary" href="' + escText(d.shareLink) + '" target="_blank" rel="noopener">Open to test</a>' +
+              '<button type="button" class="btn btn-secondary" data-role="dismiss">Dismiss</button>' +
+            '</div>' +
+            '<p class="muted" style="font-size:13px; margin:0;">' +
+              escText(d.kindEmoji) + ' ' + escText(d.kind) + ' · ' + fmtBytes(d.size) +
+              ' · ' + (d.allowDownload ? 'Downloads allowed' : 'Preview only') +
+              ' · Stored in ' + storage +
+            '</p>';
+          card.querySelector('[data-role="copy"]').addEventListener('click', async (e) => {
+            const b = e.currentTarget;
+            try { await navigator.clipboard.writeText(d.shareLink); const prev = b.textContent; b.textContent = 'Copied!'; setTimeout(() => b.textContent = prev, 1500); }
+            catch { b.textContent = 'Copy failed — long-press the link'; }
+          });
+          card.querySelector('[data-role="dismiss"]').addEventListener('click', () => card.remove());
+          // Keep the success card in view without snapping the page around
+          card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+
+        function resetUploadForm() {
+          btn.disabled = false;
+          btn.textContent = 'Upload and make link';
+          progress.classList.remove('is-active');
+          progress.classList.remove('is-done');
+          progressFill.style.width = '0%';
+          progressPct.textContent = '0%';
+          progressBytes.textContent = '0 B / 0 B';
+          progressSpeed.textContent = '';
+          progressEta.textContent = '';
+          // Clear the file input + dropzone state but keep the Title and
+          // "allow download" choice — users often share similar files in
+          // batches and shouldn't have to re-check the box each time.
+          fileInput.value = '';
+          showFilename();
+          errMsg.style.display = 'none';
+        }
       </script>
     `,
   }));
@@ -897,10 +968,19 @@ const RECENT_LIST_JS = `
         const res = await fetch('/api/recent?' + buildQs(), { credentials: 'same-origin' });
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
+        const hasFilters = filters.kind !== 'all' || filters.q || filters.from || filters.to;
         if (data.html) {
           list.innerHTML = data.html;
+          // First upload ever: server rendered the heading + filter bar
+          // hidden, show them now that the user has at least one file.
+          const heading = document.getElementById('recent-heading');
+          const bar = document.getElementById('filter-bar');
+          if (heading) heading.style.display = '';
+          if (bar) bar.style.display = '';
         } else {
-          list.innerHTML = '<div class="recent-empty">No files match those filters.</div>';
+          list.innerHTML = '<div class="recent-empty">'
+            + (hasFilters ? 'No files match those filters.' : 'You haven\\'t shared anything yet.')
+            + '</div>';
         }
         setSentinelActive(data.nextCursor);
       } catch (err) {
@@ -939,6 +1019,11 @@ const RECENT_LIST_JS = `
       io.observe(sentinel);
     }
     if (sentinel && sentinel.dataset.cursor) attachObserver();
+
+    // --- Reload when the upload form tells us a new file just landed ---
+    // Keeps active filters intact; refreshFirstPage re-reads them from the
+    // filters object each call, so a filtered list stays filtered.
+    document.addEventListener('recent:refresh', () => { refreshFirstPage(); });
 
     // --- Filter bar wiring ---
     chips.forEach(c => c.addEventListener('click', () => {
@@ -1033,7 +1118,7 @@ const RECENT_LIST_JS = `
 
 app.post('/api/upload', requireUser, upload.single('file'), async (req, res) => {
   const file = req.file;
-  if (!file) return res.status(400).send(uploadErrorPage('No file uploaded', req.user));
+  if (!file) return res.status(400).json({ ok: false, error: 'No file uploaded.' });
 
   try {
     console.log(`[upload] user=${req.user.id} ${file.originalname} mime=${file.mimetype} size=${file.size}`);
@@ -1077,37 +1162,24 @@ app.post('/api/upload', requireUser, upload.single('file'), async (req, res) => 
     const shareLink = `${PUBLIC_ORIGIN}/f/${slug}`;
     console.log(`[upload] done user=${req.user.id}: ${shareLink}`);
 
-    res.send(layout({
-      title: 'Link ready — ' + SITE_NAME,
-      user: req.user,
-      body: `
-        <h1 class="ok">Link ready</h1>
-        <p class="muted">Send this link. The viewer is built in — no app needed.</p>
-        <div class="card stack">
-          <div class="link-box" id="link">${escHtml(shareLink)}</div>
-          <button class="btn btn-block" id="copyBtn" type="button">Copy link</button>
-          <a class="btn btn-secondary btn-block" href="/f/${slug}" target="_blank" rel="noopener">Open to test</a>
-        </div>
-        <div class="card">
-          <p><strong>${kindEmoji(cls.kind)} ${escHtml(cls.kind)}</strong> · ${fmtBytes(file.size)}</p>
-          <p class="muted" style="margin: 0;">${allowDownload ? 'Downloads allowed' : 'Preview only — downloads off'}</p>
-          <p class="muted" style="margin: 6px 0 0; font-size: 13px;">
-            Stored in ${ghlCfg.source === 'user' ? `your folder <strong>${escHtml(ghlCfg.folderName)}</strong>` : 'the shared folder'}.
-          </p>
-        </div>
-        <a href="/upload" class="btn btn-secondary btn-block">Upload another</a>
-        <script>
-          const btn = document.getElementById('copyBtn');
-          btn.addEventListener('click', async () => {
-            try { await navigator.clipboard.writeText(${JSON.stringify(shareLink)}); btn.textContent = 'Copied!'; setTimeout(() => btn.textContent = 'Copy link', 1500); }
-            catch { btn.textContent = 'Copy failed — long-press the link'; }
-          });
-        </script>
-      `,
-    }));
+    // JSON response so the client can render the success state in place
+    // without a page navigation. Previous HTML-response + document.write
+    // flow could leave the page blank if the response parse failed.
+    res.json({
+      ok: true,
+      slug,
+      shareLink,
+      title,
+      kind: cls.kind,
+      kindEmoji: kindEmoji(cls.kind),
+      size: file.size,
+      allowDownload,
+      storageSource: ghlCfg.source,
+      folderName: ghlCfg.folderName,
+    });
   } catch (err) {
     console.error('[upload] failed:', err.message);
-    res.status(400).send(uploadErrorPage(err.message || 'Unknown error', req.user));
+    res.status(400).json({ ok: false, error: err.message || 'Unknown error' });
   } finally {
     try { fs.unlinkSync(file.path); } catch {}
   }
@@ -1131,14 +1203,34 @@ app.get('/raw/:slug', async (req, res) => {
   const rec = fdb.getBySlug(req.params.slug);
   if (!rec) return res.status(404).send('Not found');
   try {
-    const upstream = await fetch(rec.ghl_url);
+    // Forward the Range header so HTML5 <video> / <audio> can seek and
+    // progressively load. Without this, the browser gets a flat 200 with
+    // the whole body and many browsers refuse to play the video at all
+    // — there's no way to scrub, and Safari in particular won't start
+    // playback. GHL's CDN supports range requests natively.
+    const headers = {};
+    if (req.headers.range) headers.range = req.headers.range;
+    const upstream = await fetch(rec.ghl_url, { headers });
     if (!upstream.ok || !upstream.body) return res.status(502).send('Upstream error');
+
+    // Mirror the upstream status (200 for a full body, 206 for a partial
+    // range). Whatever we return here, <video> uses the status to decide
+    // whether to trust the range it asked for.
+    res.status(upstream.status);
+
+    // Always set our MIME (we know the original extension via classify);
+    // GHL's octet-stream shouldn't win. Pass through size + range headers.
     res.set('Content-Type', rec.mime_type || 'application/octet-stream');
-    const len = upstream.headers.get('content-length');
-    if (len) res.set('Content-Length', len);
-    const range = upstream.headers.get('accept-ranges');
-    if (range) res.set('Accept-Ranges', range);
+    for (const h of ['content-length', 'content-range', 'accept-ranges']) {
+      const v = upstream.headers.get(h);
+      if (v) res.set(h, v);
+    }
+    // Declare range support even if the upstream didn't echo it back —
+    // some <video> implementations look for Accept-Ranges before issuing
+    // a follow-up Range request for seeking.
+    if (!upstream.headers.get('accept-ranges')) res.set('Accept-Ranges', 'bytes');
     res.set('Cache-Control', 'public, max-age=3600');
+
     const { Readable } = require('node:stream');
     Readable.fromWeb(upstream.body).pipe(res);
   } catch (err) {
@@ -1153,12 +1245,20 @@ app.get('/d/:slug', async (req, res) => {
   if (!rec.download_allowed) return res.status(403).send('Downloads are disabled for this file.');
   const filename = rec.original_filename || (rec.title || 'file') + '.' + (rec.kind === 'text' ? 'txt' : rec.kind);
   try {
-    const upstream = await fetch(rec.ghl_url);
+    // Forward Range for resumable downloads on flaky networks and to let
+    // GHL serve partial content for huge videos instead of transferring
+    // the whole body if the client only asked for a slice.
+    const headers = {};
+    if (req.headers.range) headers.range = req.headers.range;
+    const upstream = await fetch(rec.ghl_url, { headers });
     if (!upstream.ok || !upstream.body) return res.status(502).send('Upstream error');
+    res.status(upstream.status);
     res.set('Content-Type', rec.mime_type || 'application/octet-stream');
     res.set('Content-Disposition', `attachment; filename="${filename.replace(/"/g, '')}"`);
-    const len = upstream.headers.get('content-length');
-    if (len) res.set('Content-Length', len);
+    for (const h of ['content-length', 'content-range', 'accept-ranges']) {
+      const v = upstream.headers.get(h);
+      if (v) res.set(h, v);
+    }
     res.set('Cache-Control', 'private, max-age=0');
     const { Readable } = require('node:stream');
     Readable.fromWeb(upstream.body).pipe(res);
