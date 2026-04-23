@@ -2340,14 +2340,16 @@ app.get('/magic/:token', async (req, res) => {
       }));
     }
 
-    // Claim every pending file tied to the magic-link's guest_id.
-    const claimed = fdb.claimPendingForGuest(u.id, row.guest_id);
+    // Claim every pending file that belongs to this guest. We match by
+    // guest_id OR pending_email so the flow survives session edge cases
+    // (cookie invalidation, cross-browser activation, deploy races).
+    const beforeCount = fdb.countPendingMatching(row.guest_id, row.email);
+    const claimed = fdb.claimPendingForGuest(u.id, row.guest_id, row.email);
     mldb.markUsed(tokenHash);
 
     setAuthCookie(res, u.id);
-    // Clear the guest cookie — they're a real user now.
     res.clearCookie('gid');
-    console.log(`[magic] user=${u.id} claimed=${claimed}`);
+    console.log(`[magic] user=${u.id} email=${row.email} guest_id=${row.guest_id} pending_before=${beforeCount} claimed=${claimed}`);
 
     return res.redirect('/upload?claimed=' + claimed);
   } catch (err) {
