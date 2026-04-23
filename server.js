@@ -1611,15 +1611,38 @@ app.get('/upload', requireUser, (req, res) => {
   const usage = isTrial ? users.trialUsage(req.user.id) : null;
 
   // Show a welcome banner when the user just clicked a magic link and
-  // landed here with freshly-claimed files. Helps them see that their
-  // link is real and ready to copy.
+  // landed here with freshly-claimed files. If any pending files hit
+  // the trial cap and got rejected, explain that too — otherwise the
+  // user wonders where the other files went.
   const claimed = Math.max(0, parseInt(req.query.claimed, 10) || 0);
-  const claimedBanner = claimed > 0 ? `
-    <div class="card" style="border-left:4px solid var(--ok); background:#f0fdf4;">
-      <h2 style="margin:0 0 4px; color:#166534; font-size:18px;">🎉 Welcome! Your link ${claimed === 1 ? 'is' : claimed + ' links are'} ready.</h2>
-      <p class="muted" style="margin:0; font-size:14px;">Scroll to your recent shares below — copy the link to send it.</p>
-    </div>
-  ` : '';
+  const rejected = Math.max(0, parseInt(req.query.rejected, 10) || 0);
+  let claimedBanner = '';
+  if (claimed > 0 && rejected === 0) {
+    claimedBanner = `
+      <div class="card" style="border-left:4px solid var(--ok); background:#f0fdf4;">
+        <h2 style="margin:0 0 4px; color:#166534; font-size:18px;">🎉 Welcome! Your link ${claimed === 1 ? 'is' : claimed + ' links are'} ready.</h2>
+        <p class="muted" style="margin:0; font-size:14px;">Scroll to your recent shares below — copy the link to send it.</p>
+      </div>
+    `;
+  } else if (claimed > 0 && rejected > 0) {
+    claimedBanner = `
+      <div class="card" style="border-left:4px solid #f59e0b; background:#fffbeb;">
+        <h2 style="margin:0 0 4px; color:#92400e; font-size:18px;">Welcome — ${claimed} file${claimed === 1 ? '' : 's'} activated.</h2>
+        <p class="muted" style="margin:0; font-size:14px;">
+          ${rejected} upload${rejected === 1 ? ' was' : 's were'} not activated because your trial allows one file of each kind. Ask the admin to upgrade your account for unlimited uploads.
+        </p>
+      </div>
+    `;
+  } else if (claimed === 0 && rejected > 0) {
+    claimedBanner = `
+      <div class="card" style="border-left:4px solid var(--err); background:#fef2f2;">
+        <h2 style="margin:0 0 4px; color:#991b1b; font-size:18px;">Upload not activated — trial limit reached.</h2>
+        <p class="muted" style="margin:0; font-size:14px;">
+          Your trial allows one file of each kind, and you've already used that slot. Ask the admin to upgrade your account to regular to unlock unlimited uploads.
+        </p>
+      </div>
+    `;
+  }
 
   const firstPage = fdb.listRecentByUser(req.user.id, { limit: RECENT_PAGE_SIZE });
   const nextCursor = firstPage.length === RECENT_PAGE_SIZE
@@ -2340,18 +2363,52 @@ app.get('/magic/:token', async (req, res) => {
       }));
     }
 
-    // Claim every pending file that belongs to this guest. We match by
-    // guest_id OR pending_email so the flow survives session edge cases
-    // (cookie invalidation, cross-browser activation, deploy races).
-    const beforeCount = fdb.countPendingMatching(row.guest_id, row.email);
-    const claimed = fdb.claimPendingForGuest(u.id, row.guest_id, row.email);
+    // Gather every pending file that belongs to this guest (by cookie
+    // OR by the email we stashed on the row). Trial users hit the cap
+    // below; regular/admin users get everything activated.
+    const pending = fdb.listPendingMatching(row.guest_id, row.email);
+
+    const toActivate = [];
+    const toReject = [];
+
+    if (u.status === 'trial') {
+      // Trial cap is 1 per kind. Count what they already have live +
+      // decide per pending row whether to accept. Oldest-first order
+      // matches the ORDER BY id ASC in listPendingMatching so the
+      // earliest upload wins if multiple of the same kind are pending.
+      const remainingByKind = {};
+      for (const k of ['image', 'video', 'audio', 'pdf', 'text']) {
+        remainingByKind[k] = Math.max(0, 1 - fdb.countByUserAndKind(u.id, k));
+      }
+      for (const p of pending) {
+        if ((remainingByKind[p.kind] || 0) > 0) {
+          toActivate.push(p);
+          remainingByKind[p.kind]--;
+        } else {
+          toReject.push(p);
+        }
+      }
+    } else {
+      // Regular + admin users have no cap.
+      toActivate.push(...pending);
+    }
+
+    const claimed = fdb.activateByIds(toActivate.map(p => p.id), u.id);
+    // Drop rejected rows + best-effort GHL cleanup so we don't leave
+    // orphan bytes on the CDN. It's safe to silently drop these — the
+    // user already knows they're on trial; the banner on /upload
+    // explains exactly what happened.
+    if (toReject.length) {
+      fdb.deleteByIds(toReject.map(p => p.id));
+      for (const r of toReject) { try { ghl.tryDeleteFromGhl(r.ghl_url); } catch {} }
+    }
     mldb.markUsed(tokenHash);
 
     setAuthCookie(res, u.id);
     res.clearCookie('gid');
-    console.log(`[magic] user=${u.id} email=${row.email} guest_id=${row.guest_id} pending_before=${beforeCount} claimed=${claimed}`);
+    console.log(`[magic] user=${u.id} status=${u.status} email=${row.email} pending=${pending.length} claimed=${claimed} rejected=${toReject.length}`);
 
-    return res.redirect('/upload?claimed=' + claimed);
+    return res.redirect(`/upload?claimed=${claimed}&rejected=${toReject.length}`);
   } catch (err) {
     console.error('[magic] error:', err);
     return res.send(renderStandaloneAuthPage({
