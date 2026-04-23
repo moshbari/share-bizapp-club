@@ -20,6 +20,7 @@ const os = require('node:os');
 const { users: udb, files: fdb, passwordResets: prdb, magicLinks: mldb } = require('./lib/db');
 const users = require('./lib/users');
 const ghl = require('./lib/ghl');
+const transcode = require('./lib/transcode');
 const email = require('./lib/email');
 const { classify, SIZE_CAPS, fmtBytes } = require('./lib/classify');
 const viewers = require('./lib/viewers');
@@ -2161,19 +2162,37 @@ app.post('/api/upload', requireUser, upload.single('file'), async (req, res) => 
     const safeBase = sanitizeForFilename(title);
     const ghlDisplayName = `${safeBase}-${uniq}.${cls.ghlExt}`;
 
+    // Transcode audio to mp3 when the source format isn't GHL-accepted
+    // (iPhone .m4a, WebM .weba, .aac, .aiff, ...). Keeps the original
+    // filename but flips the extension to .mp3 so downloads play.
+    let uploadPath = file.path;
+    let uploadSize = file.size;
+    let effectiveOriginalName = file.originalname;
+    let transcodedTmp = null;
+    if (cls.needsTranscode && cls.kind === 'audio') {
+      console.log(`[upload] transcoding ${file.originalname} → mp3...`);
+      transcodedTmp = transcode.transcodeToMp3(file.path);
+      uploadPath = transcodedTmp;
+      uploadSize = fs.statSync(transcodedTmp).size;
+      effectiveOriginalName = file.originalname.replace(/\.[^.]+$/, '') + '.mp3';
+      console.log(`[upload] transcoded ${fmtBytes(file.size)} → ${fmtBytes(uploadSize)}`);
+    }
+
     // Pick the user's GHL config if they set one; otherwise fall back to
     // shared env. Trial users are gated above so they only ever hit
     // shared here, which matches the "regular users only" rule.
     const ghlCfg = users.effectiveGhlConfig(fresh);
-    const ghlUrl = ghl.uploadToGhl(file.path, ghlDisplayName, cls.ghlMime, ghlCfg);
+    const ghlUrl = ghl.uploadToGhl(uploadPath, ghlDisplayName, cls.ghlMime, ghlCfg);
     console.log(`[upload] user=${req.user.id} target=${ghlCfg.source}`);
 
     fdb.insert({
-      slug, title, original_filename: file.originalname,
-      kind: cls.kind, mime_type: cls.mime, size_bytes: file.size,
+      slug, title, original_filename: effectiveOriginalName,
+      kind: cls.kind, mime_type: cls.mime, size_bytes: uploadSize,
       download_allowed: allowDownload, ghl_url: ghlUrl,
       user_id: req.user.id,
     });
+
+    if (transcodedTmp) { try { fs.unlinkSync(transcodedTmp); } catch {} }
 
     const shareLink = `${PUBLIC_ORIGIN}/f/${slug}`;
     console.log(`[upload] done user=${req.user.id}: ${shareLink}`);
@@ -2246,21 +2265,38 @@ app.post('/api/guest-upload', guestRateLimit, upload.single('file'), async (req,
     const safeBase = sanitizeForFilename(title);
     const ghlDisplayName = `${safeBase}-${uniq}.${cls.ghlExt}`;
 
+    // Same audio transcode pipeline as the authed upload — iPhone
+    // voice memos drop as .m4a which GHL refuses outright.
+    let uploadPath = file.path;
+    let uploadSize = file.size;
+    let effectiveOriginalName = file.originalname;
+    let transcodedTmp = null;
+    if (cls.needsTranscode && cls.kind === 'audio') {
+      console.log(`[guest-upload] transcoding ${file.originalname} → mp3...`);
+      transcodedTmp = transcode.transcodeToMp3(file.path);
+      uploadPath = transcodedTmp;
+      uploadSize = fs.statSync(transcodedTmp).size;
+      effectiveOriginalName = file.originalname.replace(/\.[^.]+$/, '') + '.mp3';
+      console.log(`[guest-upload] transcoded ${fmtBytes(file.size)} → ${fmtBytes(uploadSize)}`);
+    }
+
     // Guest uploads always go to shared storage — they don't have a
     // per-user GHL config yet. Once they activate and become a regular
     // user they can point new uploads at their own folder.
-    const ghlUrl = ghl.uploadToGhl(file.path, ghlDisplayName, cls.ghlMime);
+    const ghlUrl = ghl.uploadToGhl(uploadPath, ghlDisplayName, cls.ghlMime);
 
     fdb.insert({
-      slug, title, original_filename: file.originalname,
-      kind: cls.kind, mime_type: cls.mime, size_bytes: file.size,
+      slug, title, original_filename: effectiveOriginalName,
+      kind: cls.kind, mime_type: cls.mime, size_bytes: uploadSize,
       download_allowed: allowDownload, ghl_url: ghlUrl,
       user_id: null,
       activated: 0,
       guest_id: req.guestId,
     });
 
-    console.log(`[guest-upload] guest=${req.guestId} slug=${slug} size=${file.size}`);
+    if (transcodedTmp) { try { fs.unlinkSync(transcodedTmp); } catch {} }
+
+    console.log(`[guest-upload] guest=${req.guestId} slug=${slug} size=${uploadSize}`);
 
     res.json({
       ok: true,
@@ -2268,7 +2304,7 @@ app.post('/api/guest-upload', guestRateLimit, upload.single('file'), async (req,
       title,
       kind: cls.kind,
       kindEmoji: kindEmoji(cls.kind),
-      size: file.size,
+      size: uploadSize,
       allowDownload,
     });
   } catch (err) {

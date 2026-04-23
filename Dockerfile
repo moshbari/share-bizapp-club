@@ -10,7 +10,7 @@ FROM node:20-slim
 # unzip is needed at build time only (for the PDF.js prebuilt) — we strip it
 # again in the same RUN so it doesn't bloat the runtime image.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl ca-certificates unzip \
+    && apt-get install -y --no-install-recommends curl ca-certificates unzip ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
