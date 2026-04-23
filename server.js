@@ -2835,6 +2835,26 @@ app.post('/admin/users/:id/delete', requireUser, requireAdmin, (req, res) => {
 
 app.get('/healthz', (req, res) => res.json({ ok: true, site: SITE_NAME }));
 
+// Admin-only server-capacity snapshot. Runs `df` inside the container,
+// which sees the host's disk via the /app/data bind mount, so the
+// numbers for that path reflect the Hetzner VPS's real free space.
+app.get('/api/admin/system', requireUser, requireAdmin, (req, res) => {
+  const { execFileSync } = require('node:child_process');
+  function run(cmd, args) {
+    try { return execFileSync(cmd, args, { encoding: 'utf8', timeout: 5000 }).trim(); }
+    catch (e) { return `error: ${e.message.slice(0, 200)}`; }
+  }
+  res.json({
+    ok: true,
+    df_h: run('df', ['-h']),
+    df_P_total: run('df', ['-P', '-B1', '/app/data']),
+    uptime: run('uptime', []),
+    free: run('free', ['-h']),
+    hostname: run('hostname', []),
+    node: process.version,
+  });
+});
+
 // ---------- boot ----------
 
 console.log(`[boot] starting ${SITE_NAME} on :${PORT}`);
