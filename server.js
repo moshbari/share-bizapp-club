@@ -17,7 +17,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 
-const { users: udb, files: fdb, passwordResets: prdb } = require('./lib/db');
+const { users: udb, files: fdb, passwordResets: prdb, magicLinks: mldb } = require('./lib/db');
 const users = require('./lib/users');
 const ghl = require('./lib/ghl');
 const email = require('./lib/email');
@@ -75,6 +75,47 @@ const upload = multer({
   dest: process.env.UPLOAD_TMP || os.tmpdir(),
   limits: { fileSize: SIZE_CAPS.video },
 });
+
+// Guest session: mint a signed guest_id cookie for anyone who isn't
+// logged in yet. It's how we correlate "the file they just uploaded"
+// with "the email they're about to enter" to the magic link they'll
+// click. Random 16 bytes → 22-char base64url, plenty unique for our scale.
+app.use((req, res, next) => {
+  if (req.user) return next();
+  if (!req.signedCookies.gid) {
+    const id = crypto.randomBytes(16).toString('base64url');
+    res.cookie('gid', id, {
+      signed: true, httpOnly: true, sameSite: 'lax', secure: true,
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+    });
+    req.guestId = id;
+  } else {
+    req.guestId = req.signedCookies.gid;
+  }
+  next();
+});
+
+// In-memory per-IP rate limiter for /api/guest-upload. Good enough for
+// a single-container deployment — if we ever scale horizontally we'll
+// swap this for something shared. Rolling window kept in a Map so old
+// entries self-evict on each check.
+const GUEST_UPLOAD_LIMIT = 3;
+const GUEST_UPLOAD_WINDOW_MS = 60 * 60 * 1000;
+const guestUploadBuckets = new Map();
+function guestRateLimit(req, res, next) {
+  const ip = (req.ip || req.connection.remoteAddress || 'unknown').toString();
+  const now = Date.now();
+  const arr = (guestUploadBuckets.get(ip) || []).filter(t => now - t < GUEST_UPLOAD_WINDOW_MS);
+  if (arr.length >= GUEST_UPLOAD_LIMIT) {
+    return res.status(429).json({
+      ok: false,
+      error: `Too many uploads from this IP. Try again in an hour, or sign up for a free account to keep going.`,
+    });
+  }
+  arr.push(now);
+  guestUploadBuckets.set(ip, arr);
+  next();
+}
 
 function requireUser(req, res, next) {
   if (req.user) return next();
@@ -359,11 +400,10 @@ function renderRecentCard(r) {
 
 app.get('/', (req, res) => {
   if (req.user) return res.redirect('/upload');
-  // Send first-time visitors to the Start Free tab rather than the sign-in
-  // form. The auth page renders both tabs; /signup just picks which is
-  // active on first paint. Existing users still see a prominent "Sign in"
-  // tab right next to it.
-  return res.redirect('/signup');
+  // Progressive signup: logged-out visitors see a drag-drop first. They
+  // upload without creating an account, then provide an email to get a
+  // magic link that activates the share link AND creates their account.
+  return res.send(renderGuestLandingPage());
 });
 
 app.get('/login', (req, res) => {
@@ -396,6 +436,295 @@ app.get('/signup', (req, res) => {
     signupErr: err,
   }));
 });
+
+// ---------- guest landing page ----------
+//
+// The money page. Visitors land → drop a file → we upload it in the
+// background and ask for an email → they click the magic link → account
+// + share link in one go. Keeps the same split-screen aesthetic as the
+// auth pages so the brand stays consistent.
+
+function renderGuestLandingPage() {
+  const caps = `Images ${fmtBytes(SIZE_CAPS.image)} · Video ${fmtBytes(SIZE_CAPS.video)} · Audio ${fmtBytes(SIZE_CAPS.audio)} · PDFs ${fmtBytes(SIZE_CAPS.pdf)} · Text ${fmtBytes(SIZE_CAPS.text)}`;
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Share any file — ${escHtml(SITE_NAME)}</title>
+  <meta name="robots" content="noindex,nofollow">
+  <style>${AUTH_CSS}${LANDING_CSS}</style>
+</head>
+<body class="auth-body">
+  <div class="auth-layout">
+    <aside class="auth-brand">
+      <div class="auth-brand-inner">
+        <a href="/" class="auth-logo">
+          <span class="auth-logo-mark">📤</span>
+          <span>${escHtml(SITE_NAME)}</span>
+        </a>
+        <span class="auth-eyebrow">
+          <span class="auth-eyebrow-dot"></span>
+          FREE — no signup to upload
+        </span>
+        <h1 class="auth-hero">Drop a file.<br>Share a link.</h1>
+        <p class="auth-subtitle">
+          No account needed to upload. Just drop any file and we'll send
+          your share link to your inbox — one click to activate and
+          you're done. <strong style="color:#fff;">Images, video, audio, PDF, markdown, code.</strong>
+        </p>
+        <ul class="auth-features">
+          <li><span class="auth-feat-icon">⚡</span> <div><strong>30-second uploads</strong><span>Drop the file, add your email, click the link — that's it.</span></div></li>
+          <li><span class="auth-feat-icon">📥</span> <div><strong>Built-in viewers</strong><span>Your recipients preview in-browser — no downloads needed.</span></div></li>
+          <li><span class="auth-feat-icon">🔒</span> <div><strong>Secure by default</strong><span>Per-file download toggle, optional password links, short URLs.</span></div></li>
+        </ul>
+        <div class="auth-footer-note">Already have an account? <a style="color:#86efac;" href="/login">Sign in →</a></div>
+      </div>
+    </aside>
+
+    <main class="auth-main">
+      <div class="auth-card" style="max-width:520px;">
+        <div id="stage-drop">
+          <h2 class="auth-panel-title">Share a file — free</h2>
+          <p class="auth-panel-sub">Drop any file. We'll generate a share link and email it to you.</p>
+
+          <form id="guestForm" class="auth-form" novalidate>
+            <div>
+              <div class="dropzone" id="dropzone">
+                <input id="guest-file" name="file" type="file" required>
+                <div class="dropzone-inner">
+                  <div class="dropzone-icon" id="dropzoneIcon">📤</div>
+                  <div class="dropzone-text">
+                    <strong>Drop a file here</strong>
+                    <span class="sub">or tap to choose</span>
+                  </div>
+                  <div class="dropzone-filename" id="dropzoneFilename"></div>
+                </div>
+              </div>
+              <p class="muted" style="font-size:12px; margin:6px 0 0;">${escHtml(caps)}</p>
+            </div>
+
+            <label class="checkbox-row" for="guest-allow-download" style="background:#f8fafc; border:1px solid #e5e7eb; border-radius:10px; padding:10px 14px; display:flex; gap:10px; cursor:pointer; align-items:center;">
+              <input id="guest-allow-download" name="allow_download" type="checkbox" checked style="width:18px; height:18px; margin:0;">
+              <span style="flex:1; font-weight:500; color:#0f172a;">Allow recipients to download
+                <span style="display:block; font-weight:400; font-size:13px; color:#64748b; margin-top:2px;">Turn off for preview-only share.</span>
+              </span>
+            </label>
+
+            <button type="submit" class="auth-submit auth-submit--cta" id="guest-submit">
+              Upload and get my link <span class="auth-submit-arrow">→</span>
+            </button>
+            <div class="progress" id="guest-progress" aria-live="polite" style="display:none;">
+              <div class="progress-pct" id="guest-progress-pct">0%</div>
+              <div class="progress-bar"><div class="progress-fill" id="guest-progress-fill"></div></div>
+              <div class="progress-meta">
+                <span><strong id="guest-progress-bytes">0 B / 0 B</strong></span>
+                <span id="guest-progress-speed"></span>
+                <span id="guest-progress-eta"></span>
+              </div>
+            </div>
+            <p class="auth-error" id="guest-err" style="display:none;"></p>
+          </form>
+        </div>
+
+        <div id="stage-email" style="display:none;">
+          <h2 class="auth-panel-title">Where should we send your link?</h2>
+          <p class="auth-panel-sub">Your file is uploaded. Enter your email and we'll send a one-click link to activate and view your share URL.</p>
+          <div class="summary-card" id="summary-card"></div>
+          <form id="emailForm" class="auth-form" novalidate>
+            <div class="auth-field">
+              <label for="guest-email">Email</label>
+              <input id="guest-email" name="email" type="email" required autocomplete="email" placeholder="you@example.com" autofocus>
+            </div>
+            <button type="submit" class="auth-submit auth-submit--cta" id="guest-email-submit">
+              Email me the share link <span class="auth-submit-arrow">→</span>
+            </button>
+            <ul class="auth-trust">
+              <li><span class="auth-trust-check">✓</span> No credit card</li>
+              <li><span class="auth-trust-check">✓</span> Link expires in 15 minutes</li>
+              <li><span class="auth-trust-check">✓</span> One-click activation</li>
+            </ul>
+            <p class="auth-error" id="email-err" style="display:none;"></p>
+          </form>
+        </div>
+
+        <div id="stage-sent" style="display:none; text-align:center; padding: 8px 0;">
+          <div style="font-size:48px; margin-bottom: 8px;">📬</div>
+          <h2 class="auth-panel-title" style="text-align:center;">Check your inbox</h2>
+          <p class="auth-panel-sub" style="text-align:center;">
+            We sent a link to <strong id="sent-email-display"></strong>.
+            Click it to activate your share link and create your free account.
+          </p>
+          <p class="muted" style="font-size:13px; margin-top:16px;">
+            Didn't see it? Check spam. Or <a href="#" id="resend-link" style="color:#2563eb; text-decoration:underline;">send it again</a>.
+          </p>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    const SIZE_CAPS = ${JSON.stringify(SIZE_CAPS)};
+    function classifyClient(name, mime) {
+      const ext = (name.split('.').pop() || '').toLowerCase();
+      const m = (mime || '').toLowerCase();
+      if (m.startsWith('image/')) return { kind: 'image', cap: SIZE_CAPS.image };
+      if (m.startsWith('video/')) return { kind: 'video', cap: SIZE_CAPS.video };
+      if (m.startsWith('audio/')) return { kind: 'audio', cap: SIZE_CAPS.audio };
+      if (m === 'application/pdf' || ext === 'pdf') return { kind: 'pdf', cap: SIZE_CAPS.pdf };
+      return { kind: 'text', cap: SIZE_CAPS.text };
+    }
+    function fmtBytes(b) { if (!b) return '0 B'; const u=['B','KB','MB','GB']; let i=0,n=b; while(n>=1024&&i<u.length-1){n/=1024;i++;} return (n<10&&i>0?n.toFixed(1):Math.round(n))+' '+u[i]; }
+    function fmtEta(s){ if(!Number.isFinite(s)||s<=0)return''; if(s<60)return Math.round(s)+'s left'; if(s<3600)return Math.round(s/60)+'m left'; return (s/3600).toFixed(1)+'h left'; }
+
+    const stageDrop = document.getElementById('stage-drop');
+    const stageEmail = document.getElementById('stage-email');
+    const stageSent = document.getElementById('stage-sent');
+    const dropzone = document.getElementById('dropzone');
+    const fileInput = document.getElementById('guest-file');
+    const filenameEl = document.getElementById('dropzoneFilename');
+    const iconEl = document.getElementById('dropzoneIcon');
+    const btn = document.getElementById('guest-submit');
+    const err = document.getElementById('guest-err');
+    const progress = document.getElementById('guest-progress');
+    const progressFill = document.getElementById('guest-progress-fill');
+    const progressPct = document.getElementById('guest-progress-pct');
+    const progressBytes = document.getElementById('guest-progress-bytes');
+    const progressSpeed = document.getElementById('guest-progress-speed');
+    const progressEta = document.getElementById('guest-progress-eta');
+
+    function showFilename() {
+      const f = fileInput.files && fileInput.files[0];
+      if (f) { filenameEl.textContent = f.name + ' (' + fmtBytes(f.size) + ')'; dropzone.classList.add('has-file'); iconEl.textContent = '✅'; }
+      else { filenameEl.textContent = ''; dropzone.classList.remove('has-file'); iconEl.textContent = '📤'; }
+    }
+    ['dragenter','dragover'].forEach(ev => dropzone.addEventListener(ev, e => { e.preventDefault(); e.stopPropagation(); dropzone.classList.add('is-dragover'); }));
+    ['dragleave','drop'].forEach(ev => dropzone.addEventListener(ev, e => { e.preventDefault(); e.stopPropagation(); dropzone.classList.remove('is-dragover'); }));
+    dropzone.addEventListener('drop', (e) => { if (e.dataTransfer?.files?.length) { try { fileInput.files = e.dataTransfer.files; } catch {} showFilename(); } });
+    fileInput.addEventListener('change', showFilename);
+
+    document.getElementById('guestForm').addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      err.style.display = 'none';
+      const f = fileInput.files && fileInput.files[0];
+      if (!f) return;
+      const c = classifyClient(f.name, f.type);
+      if (f.size > c.cap) {
+        err.textContent = f.name + ' is ' + fmtBytes(f.size) + ' but the limit for ' + c.kind + ' files is ' + fmtBytes(c.cap) + '.';
+        err.style.display = 'block';
+        return;
+      }
+
+      const fd = new FormData();
+      fd.append('file', f);
+      fd.append('allow_download', document.getElementById('guest-allow-download').checked ? 'on' : '');
+
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/guest-upload');
+      const startedAt = performance.now();
+      let lastTime = startedAt, lastLoaded = 0, smoothedBps = 0;
+      const ALPHA = 0.25;
+      xhr.upload.addEventListener('progress', (e) => {
+        if (!e.lengthComputable) return;
+        const pct = Math.round((e.loaded / e.total) * 100);
+        progressFill.style.width = pct + '%';
+        progressPct.textContent = pct + '%';
+        progressBytes.textContent = fmtBytes(e.loaded) + ' / ' + fmtBytes(e.total);
+        const now = performance.now();
+        const dt = (now - lastTime) / 1000;
+        if (dt > 0.1) {
+          const sampleBps = (e.loaded - lastLoaded) / dt;
+          smoothedBps = smoothedBps === 0 ? sampleBps : (ALPHA*sampleBps + (1-ALPHA)*smoothedBps);
+          lastTime = now; lastLoaded = e.loaded;
+        }
+        progressSpeed.textContent = smoothedBps > 0 ? fmtBytes(smoothedBps) + '/s' : '';
+        const remaining = (e.total - e.loaded) / Math.max(smoothedBps, 1);
+        progressEta.textContent = fmtEta(remaining);
+      });
+      xhr.addEventListener('load', () => {
+        let data = null; try { data = JSON.parse(xhr.responseText); } catch(_) {}
+        if (xhr.status >= 200 && xhr.status < 300 && data && data.ok) {
+          progressFill.style.width = '100%';
+          progressPct.textContent = '100%';
+          progressEta.textContent = 'Done!';
+          progress.classList.add('is-done');
+          setTimeout(() => showEmailStage(data), 350);
+        } else {
+          btn.disabled = false; btn.textContent = 'Upload and get my link →';
+          progress.style.display = 'none';
+          progress.classList.remove('is-done');
+          err.textContent = (data && data.error) || ('Upload failed: ' + (xhr.status || 'network error'));
+          err.style.display = 'block';
+        }
+      });
+      xhr.addEventListener('error', () => {
+        btn.disabled = false; btn.textContent = 'Upload and get my link →';
+        progress.style.display = 'none';
+        err.textContent = 'Upload failed: network error'; err.style.display = 'block';
+      });
+      btn.disabled = true; btn.textContent = 'Uploading…';
+      progress.style.display = 'block';
+      progress.classList.add('is-active');
+      xhr.send(fd);
+    });
+
+    function showEmailStage(data) {
+      stageDrop.style.display = 'none';
+      stageEmail.style.display = '';
+      const card = document.getElementById('summary-card');
+      card.innerHTML =
+        '<div style="padding:12px 14px; background:#f1f5f9; border-radius:10px; font-size:13.5px; color:#334155; margin-bottom:12px;">' +
+          '<strong>' + data.kindEmoji + ' ' + data.title + '</strong> · ' + data.kind + ' · ' + fmtBytes(data.size) +
+        '</div>';
+    }
+
+    document.getElementById('emailForm').addEventListener('submit', async (ev) => {
+      ev.preventDefault();
+      const emailErr = document.getElementById('email-err');
+      emailErr.style.display = 'none';
+      const emailInput = document.getElementById('guest-email');
+      const emailBtn = document.getElementById('guest-email-submit');
+      const emailAddr = emailInput.value.trim();
+      emailBtn.disabled = true; emailBtn.textContent = 'Sending…';
+      try {
+        const res = await fetch('/api/guest-send-magic', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({ email: emailAddr }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.error || 'Could not send.');
+        document.getElementById('sent-email-display').textContent = data.email;
+        stageEmail.style.display = 'none';
+        stageSent.style.display = '';
+      } catch (e) {
+        emailErr.textContent = e.message;
+        emailErr.style.display = 'block';
+        emailBtn.disabled = false; emailBtn.textContent = 'Email me the share link →';
+      }
+    });
+
+    document.getElementById('resend-link').addEventListener('click', async (e) => {
+      e.preventDefault();
+      const targetEmail = document.getElementById('sent-email-display').textContent;
+      try {
+        await fetch('/api/guest-send-magic', {
+          method: 'POST', credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: targetEmail }),
+        });
+        e.target.textContent = 'Sent again! Check your inbox.';
+      } catch { e.target.textContent = 'Resend failed — refresh and try again.'; }
+    });
+  </script>
+</body>
+</html>`;
+}
+
+const LANDING_CSS = `
+  .summary-card { margin-bottom: 12px; }
+`;
 
 // ---------- password reset ----------
 //
@@ -1109,6 +1438,17 @@ app.get('/upload', requireUser, (req, res) => {
   const isTrial = req.user.status === 'trial';
   const usage = isTrial ? users.trialUsage(req.user.id) : null;
 
+  // Show a welcome banner when the user just clicked a magic link and
+  // landed here with freshly-claimed files. Helps them see that their
+  // link is real and ready to copy.
+  const claimed = Math.max(0, parseInt(req.query.claimed, 10) || 0);
+  const claimedBanner = claimed > 0 ? `
+    <div class="card" style="border-left:4px solid var(--ok); background:#f0fdf4;">
+      <h2 style="margin:0 0 4px; color:#166534; font-size:18px;">🎉 Welcome! Your link ${claimed === 1 ? 'is' : claimed + ' links are'} ready.</h2>
+      <p class="muted" style="margin:0; font-size:14px;">Scroll to your recent shares below — copy the link to send it.</p>
+    </div>
+  ` : '';
+
   const firstPage = fdb.listRecentByUser(req.user.id, { limit: RECENT_PAGE_SIZE });
   const nextCursor = firstPage.length === RECENT_PAGE_SIZE
     ? firstPage[firstPage.length - 1].id : null;
@@ -1170,6 +1510,7 @@ app.get('/upload', requireUser, (req, res) => {
     body: `
       <h1>Share a file</h1>
       <p class="muted">Drop any file. Get a link with a built-in viewer.</p>
+      ${claimedBanner}
       ${trialBanner}
       <form class="card stack" id="uploadForm">
         <div>
@@ -1677,11 +2018,196 @@ function uploadErrorPage(msg, user) {
   });
 }
 
+// ---------- progressive signup: guest upload → email → magic link ----------
+//
+// 1. POST /api/guest-upload   guest drops a file; we store it with
+//                             activated=0 and guest_id = signed cookie
+// 2. POST /api/guest-send-magic   guest gives email; we attach to pending
+//                             rows, create a 15-min magic-link token, send
+// 3. GET  /magic/:token       verify → find-or-create user → claim pending
+//                             files → sign in → redirect to /upload
+
+app.post('/api/guest-upload', guestRateLimit, upload.single('file'), async (req, res) => {
+  const file = req.file;
+  if (req.user) return res.status(400).json({ ok: false, error: 'You\'re already signed in — use the regular upload.' });
+  if (!file) return res.status(400).json({ ok: false, error: 'No file uploaded.' });
+
+  try {
+    const cls = classify(file.originalname, file.mimetype);
+    if (cls.kind === 'unknown') throw new Error(cls.reason || 'Unsupported file type');
+    if (file.size > cls.maxBytes) {
+      throw new Error(`${file.originalname} is ${fmtBytes(file.size)} but the limit for ${cls.kind} files is ${fmtBytes(cls.maxBytes)}.`);
+    }
+
+    // Best-effort cleanup of expired pending rows before we add another.
+    await sweepExpiredPending();
+
+    const userTitle = (req.body.title || '').toString().trim();
+    const title = (userTitle || baseFilename(file.originalname) || 'File').slice(0, 200);
+    const allowDownload = req.body.allow_download === 'on' || req.body.allow_download === 'true' || req.body.allow_download === '1';
+
+    const slug = nanoid(8);
+    const uniq = nanoid(4);
+    const safeBase = sanitizeForFilename(title);
+    const ghlDisplayName = `${safeBase}-${uniq}.${cls.ghlExt}`;
+
+    // Guest uploads always go to shared storage — they don't have a
+    // per-user GHL config yet. Once they activate and become a regular
+    // user they can point new uploads at their own folder.
+    const ghlUrl = ghl.uploadToGhl(file.path, ghlDisplayName, cls.ghlMime);
+
+    fdb.insert({
+      slug, title, original_filename: file.originalname,
+      kind: cls.kind, mime_type: cls.mime, size_bytes: file.size,
+      download_allowed: allowDownload, ghl_url: ghlUrl,
+      user_id: null,
+      activated: 0,
+      guest_id: req.guestId,
+    });
+
+    console.log(`[guest-upload] guest=${req.guestId} slug=${slug} size=${file.size}`);
+
+    res.json({
+      ok: true,
+      slug,
+      title,
+      kind: cls.kind,
+      kindEmoji: kindEmoji(cls.kind),
+      size: file.size,
+      allowDownload,
+    });
+  } catch (err) {
+    console.error('[guest-upload] failed:', err.message);
+    res.status(400).json({ ok: false, error: err.message });
+  } finally {
+    try { fs.unlinkSync(file.path); } catch {}
+  }
+});
+
+app.post('/api/guest-send-magic', express.json(), async (req, res) => {
+  if (req.user) return res.status(400).json({ ok: false, error: 'You\'re already signed in.' });
+  const emailAddr = ((req.body && req.body.email) || '').toLowerCase().trim();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailAddr)) {
+    return res.status(400).json({ ok: false, error: 'Please enter a valid email.' });
+  }
+
+  const pending = fdb.listPendingByGuest(req.guestId);
+  if (pending.length === 0) {
+    return res.status(400).json({ ok: false, error: 'No pending uploads found. Try uploading again.' });
+  }
+
+  // Track the email on the pending rows for admin visibility, then issue
+  // a short-lived magic link. 15 minutes keeps the attack window small
+  // without being annoying for legit users.
+  fdb.setPendingEmailForGuest(req.guestId, emailAddr);
+
+  const rawToken = crypto.randomBytes(32).toString('base64url');
+  const tokenHash = hashToken(rawToken);
+  const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString()
+    .replace('T', ' ').replace(/\..+$/, '');
+  mldb.sweep();
+  mldb.create({ tokenHash, email: emailAddr, guestId: req.guestId, expiresAt });
+
+  const magicUrl = `${PUBLIC_ORIGIN}/magic/${rawToken}`;
+
+  if (!email.isConfigured()) {
+    console.log(`[guest-magic] email not configured — link for ${emailAddr}: ${magicUrl}`);
+  } else {
+    try {
+      await email.sendMagicLinkEmail({
+        toEmail: emailAddr,
+        magicUrl,
+        siteName: SITE_NAME,
+        fileCount: pending.length,
+      });
+      console.log(`[guest-magic] sent to ${emailAddr} for ${pending.length} pending file(s)`);
+    } catch (err) {
+      console.error('[guest-magic] send failed:', err.message);
+      // Still return success so the UI moves forward. Admin can resend
+      // via the admin dashboard later if needed.
+    }
+  }
+
+  res.json({ ok: true, email: emailAddr, count: pending.length });
+});
+
+app.get('/magic/:token', async (req, res) => {
+  const tokenHash = hashToken(req.params.token);
+  const row = mldb.getByHash(tokenHash);
+  const expired = !row || row.used_at
+    || new Date(row.expires_at.replace(' ', 'T') + 'Z') < new Date();
+  if (expired) {
+    return res.send(renderStandaloneAuthPage({
+      title: 'Link expired or used',
+      subtitle: `Magic links work once and expire after 15 minutes. Upload again to get a fresh link.`,
+      body: `<p class="auth-switch"><a href="/">Upload a file</a> · <a href="/login">Sign in instead</a></p>`,
+    }));
+  }
+
+  try {
+    // Find-or-create the user. If they're new, we create with a random
+    // unguessable password_hash so the email+password login path rejects
+    // cleanly until they set a password on /account.
+    let u = udb.getByEmail(row.email);
+    if (!u) {
+      const throwawayPlain = crypto.randomBytes(24).toString('base64url');
+      const userId = udb.insert({
+        email: row.email,
+        name: row.email.split('@')[0],
+        password_hash: users.hashPassword(throwawayPlain),
+        status: 'trial',
+        is_admin: 0,
+      });
+      u = udb.getById(userId);
+      console.log(`[magic] created passwordless user ${u.email} (id=${u.id})`);
+    } else if (u.status === 'deactivated') {
+      return res.send(renderStandaloneAuthPage({
+        title: 'Account deactivated',
+        subtitle: 'Contact the admin to reactivate your account.',
+        body: `<p class="auth-switch"><a href="/">Back to home</a></p>`,
+      }));
+    }
+
+    // Claim every pending file tied to the magic-link's guest_id.
+    const claimed = fdb.claimPendingForGuest(u.id, row.guest_id);
+    mldb.markUsed(tokenHash);
+
+    setAuthCookie(res, u.id);
+    // Clear the guest cookie — they're a real user now.
+    res.clearCookie('gid');
+    console.log(`[magic] user=${u.id} claimed=${claimed}`);
+
+    return res.redirect('/upload?claimed=' + claimed);
+  } catch (err) {
+    console.error('[magic] error:', err);
+    return res.send(renderStandaloneAuthPage({
+      title: 'Something went wrong',
+      subtitle: err.message,
+      body: `<p class="auth-switch"><a href="/">Try again</a></p>`,
+    }));
+  }
+});
+
+// Drop expired pending rows (DB + best-effort GHL delete).
+async function sweepExpiredPending() {
+  try {
+    const expired = fdb.listAndDeleteExpiredPending();
+    if (expired.length) {
+      console.log(`[sweep] removed ${expired.length} expired pending file(s)`);
+      for (const r of expired) { try { ghl.tryDeleteFromGhl(r.ghl_url); } catch {} }
+    }
+  } catch (e) { console.warn('[sweep] failed:', e.message); }
+}
+
 // ---------- raw / download proxies (public) ----------
 
 app.get('/raw/:slug', async (req, res) => {
   const rec = fdb.getBySlug(req.params.slug);
   if (!rec) return res.status(404).send('Not found');
+  // Don't leak the bytes of a pending-activation file — the share link
+  // isn't live yet. Treat it the same as not-found so we don't confirm
+  // existence to someone guessing slugs.
+  if (!rec.activated) return res.status(404).send('Not found');
   try {
     // Forward the Range header so HTML5 <video> / <audio> can seek and
     // progressively load. Without this, the browser gets a flat 200 with
@@ -1722,6 +2248,7 @@ app.get('/raw/:slug', async (req, res) => {
 app.get('/d/:slug', async (req, res) => {
   const rec = fdb.getBySlug(req.params.slug);
   if (!rec) return res.status(404).send('Not found');
+  if (!rec.activated) return res.status(404).send('Not found');
   if (!rec.download_allowed) return res.status(403).send('Downloads are disabled for this file.');
   const filename = rec.original_filename || (rec.title || 'file') + '.' + (rec.kind === 'text' ? 'txt' : rec.kind);
   try {
@@ -1754,6 +2281,27 @@ app.get('/f/:slug', async (req, res) => {
   const rec = fdb.getBySlug(req.params.slug);
   if (!rec) {
     return res.status(404).send(layout({ title: 'Not found', user: req.user, body: `<h1>Not found</h1><p>This link does not exist or was removed.</p>` }));
+  }
+  // Progressive-signup uploads start in a pending state until the
+  // uploader activates via magic link. Show a polite "not yet" page
+  // instead of the actual file to keep the share URL non-reusable by
+  // strangers who happen to guess the slug.
+  if (!rec.activated) {
+    res.set('X-Robots-Tag', 'noindex, nofollow');
+    return res.send(layout({
+      title: 'Waiting for activation',
+      user: req.user,
+      body: `
+        <div class="card" style="text-align:center; padding: 40px 24px;">
+          <div style="font-size:36px; margin-bottom: 8px;">📬</div>
+          <h1 style="margin:0 0 8px;">Almost ready</h1>
+          <p class="muted" style="max-width:420px; margin:0 auto 16px;">
+            The owner of this file is activating the share link from their inbox.
+            Check back in a minute.
+          </p>
+        </div>
+      `,
+    }));
   }
   res.set('X-Robots-Tag', 'noindex, nofollow');
 
