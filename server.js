@@ -168,6 +168,19 @@ const BASE_CSS = `
   .pill { display: inline-block; padding: 3px 10px; border-radius: 99px; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
   .chip { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; background: #f1f5f9; border-radius: 99px; font-size: 13px; color: var(--fg); }
   .chip.used { background: #dcfce7; color: #166534; }
+  /* Filter bar for the recent list */
+  .filter-bar { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; margin-bottom: 16px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+  .filter-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+  .chip-btn { padding: 6px 12px; border-radius: 99px; border: 1px solid var(--border); background: #fff; font-size: 13px; font-weight: 500; cursor: pointer; color: var(--fg); white-space: nowrap; transition: background-color .1s, border-color .1s, color .1s; }
+  .chip-btn:hover { background: #f3f4f6; }
+  .chip-btn.is-active { background: var(--brand); color: #fff; border-color: var(--brand); }
+  .filter-inputs { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .filter-inputs input[type="text"] { flex: 1 1 200px; min-width: 140px; padding: 8px 12px; font-size: 14px; }
+  .filter-inputs input[type="date"] { padding: 8px 10px; font-size: 13px; border: 1px solid var(--border); border-radius: 8px; background: #fff; color: var(--fg); }
+  .filter-inputs .date-label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 500; color: var(--muted); margin: 0; }
+  .filter-inputs .date-label input[type="date"] { min-width: 140px; }
+  .filter-inputs .btn-sm { min-height: 36px; }
+  .recent-empty { text-align: center; padding: 40px 20px; color: var(--muted); font-size: 14px; }
   .dropzone { position: relative; border: 2px dashed #cbd5e1; border-radius: 12px; background: #fff; transition: border-color .15s, background-color .15s; cursor: pointer; }
   .dropzone:hover { border-color: var(--brand); background: #f8fafc; }
   .dropzone.is-dragover { border-color: var(--brand); background: #eff6ff; }
@@ -620,10 +633,37 @@ app.get('/upload', requireUser, (req, res) => {
   const nextCursor = firstPage.length === RECENT_PAGE_SIZE
     ? firstPage[firstPage.length - 1].id : null;
 
-  const recentHtml = firstPage.length === 0 ? '' : `
+  // Filter bar is rendered unconditionally whenever the user has *any*
+  // files, so they can narrow the list as it grows. When there are no
+  // files yet, we skip the whole block — filtering an empty list is just
+  // noise.
+  const hasAnyFiles = firstPage.length > 0;
+
+  const recentHtml = !hasAnyFiles ? '' : `
     <h2>Your recent shares</h2>
+    <div class="filter-bar">
+      <div class="filter-chips">
+        <button class="chip-btn is-active" type="button" data-kind="all">All</button>
+        <button class="chip-btn" type="button" data-kind="image">🖼 Images</button>
+        <button class="chip-btn" type="button" data-kind="video">🎬 Video</button>
+        <button class="chip-btn" type="button" data-kind="audio">🎙 Audio</button>
+        <button class="chip-btn" type="button" data-kind="pdf">📄 PDFs</button>
+        <button class="chip-btn" type="button" data-kind="text">📝 Text</button>
+      </div>
+      <div class="filter-inputs">
+        <input type="text" id="filter-q" placeholder="Search by name…" autocomplete="off">
+        <label class="date-label">From <input type="date" id="filter-from"></label>
+        <label class="date-label">To <input type="date" id="filter-to"></label>
+        <button type="button" class="btn btn-secondary btn-sm" id="filter-reset">Clear</button>
+      </div>
+    </div>
     <div id="recent-list">${firstPage.map(renderRecentCard).join('')}</div>
-    ${nextCursor != null ? `<div id="recent-sentinel" data-cursor="${nextCursor}" class="muted" style="text-align: center; padding: 16px;">Loading more…</div>` : ''}
+    <div id="recent-sentinel"
+         data-cursor="${nextCursor != null ? nextCursor : ''}"
+         class="muted"
+         style="text-align: center; padding: 16px;${nextCursor == null ? 'display:none;' : ''}">
+      Loading more…
+    </div>
     <script>${RECENT_LIST_JS}</script>
   `;
 
@@ -804,16 +844,140 @@ app.get('/upload', requireUser, (req, res) => {
   }));
 });
 
-// JS for the /upload recent-list block (extracted so it isn't duplicated
-// inside template literals). Event delegation covers both the initial cards
-// and everything the infinite-scroll fetch appends.
+// JS for the /upload recent-list block. Handles the filter bar (kind chips,
+// name search, date range), infinite scroll, and the per-card actions
+// (copy/rename/toggle-download/delete). Both the filter refresh and the
+// infinite-scroll fetch read from the same `filters` object, so paginating
+// a filtered list carries the filters across page requests.
 const RECENT_LIST_JS = `
   (function () {
     const list = document.getElementById('recent-list');
+    const sentinel = document.getElementById('recent-sentinel');
+    const chips = Array.from(document.querySelectorAll('.filter-chips .chip-btn'));
+    const qInput = document.getElementById('filter-q');
+    const fromInput = document.getElementById('filter-from');
+    const toInput = document.getElementById('filter-to');
+    const resetBtn = document.getElementById('filter-reset');
     if (!list) return;
+
+    const PAGE_SIZE = ${RECENT_PAGE_SIZE};
+    const filters = { kind: 'all', q: '', from: '', to: '' };
+    let loading = false;
+    let debounceTimer = null;
+    let io = null;
+
+    function buildQs(extra) {
+      const p = new URLSearchParams();
+      if (filters.kind && filters.kind !== 'all') p.set('kind', filters.kind);
+      if (filters.q)    p.set('q', filters.q);
+      if (filters.from) p.set('from', filters.from);
+      if (filters.to)   p.set('to', filters.to);
+      p.set('limit', String(PAGE_SIZE));
+      if (extra && extra.before) p.set('before', extra.before);
+      return p.toString();
+    }
+
+    function setSentinelActive(nextCursor) {
+      if (!sentinel) return;
+      if (nextCursor == null) {
+        sentinel.style.display = 'none';
+      } else {
+        sentinel.style.display = '';
+        sentinel.dataset.cursor = nextCursor;
+        sentinel.textContent = 'Loading more…';
+        if (!io) attachObserver();
+      }
+    }
+
+    async function refreshFirstPage() {
+      if (loading) return;
+      loading = true;
+      list.innerHTML = '<div class="recent-empty">Loading…</div>';
+      try {
+        const res = await fetch('/api/recent?' + buildQs(), { credentials: 'same-origin' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        if (data.html) {
+          list.innerHTML = data.html;
+        } else {
+          list.innerHTML = '<div class="recent-empty">No files match those filters.</div>';
+        }
+        setSentinelActive(data.nextCursor);
+      } catch (err) {
+        list.innerHTML = '<p class="err">Could not load. Please try again.</p>';
+      } finally {
+        loading = false;
+      }
+    }
+
+    async function fetchNextPage() {
+      if (loading || !sentinel || sentinel.style.display === 'none') return;
+      if (!sentinel.dataset.cursor) return;
+      loading = true;
+      try {
+        const res = await fetch('/api/recent?' + buildQs({ before: sentinel.dataset.cursor }), { credentials: 'same-origin' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        if (data.html) list.insertAdjacentHTML('beforeend', data.html);
+        if (data.nextCursor == null) {
+          sentinel.style.display = 'none';
+        } else {
+          sentinel.dataset.cursor = data.nextCursor;
+        }
+      } catch {
+        sentinel.textContent = 'Could not load more — scroll to retry.';
+      } finally {
+        loading = false;
+      }
+    }
+
+    function attachObserver() {
+      if (!('IntersectionObserver' in window)) return;
+      io = new IntersectionObserver((entries) => {
+        for (const ent of entries) if (ent.isIntersecting) fetchNextPage();
+      }, { rootMargin: '200px 0px' });
+      io.observe(sentinel);
+    }
+    if (sentinel && sentinel.dataset.cursor) attachObserver();
+
+    // --- Filter bar wiring ---
+    chips.forEach(c => c.addEventListener('click', () => {
+      chips.forEach(x => x.classList.remove('is-active'));
+      c.classList.add('is-active');
+      filters.kind = c.dataset.kind;
+      refreshFirstPage();
+    }));
+    if (qInput) qInput.addEventListener('input', () => {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        filters.q = qInput.value.trim();
+        refreshFirstPage();
+      }, 300);
+    });
+    if (fromInput) fromInput.addEventListener('change', () => {
+      filters.from = fromInput.value || '';
+      refreshFirstPage();
+    });
+    if (toInput) toInput.addEventListener('change', () => {
+      filters.to = toInput.value || '';
+      refreshFirstPage();
+    });
+    if (resetBtn) resetBtn.addEventListener('click', () => {
+      chips.forEach(x => x.classList.remove('is-active'));
+      const allChip = chips.find(c => c.dataset.kind === 'all');
+      if (allChip) allChip.classList.add('is-active');
+      if (qInput) qInput.value = '';
+      if (fromInput) fromInput.value = '';
+      if (toInput) toInput.value = '';
+      filters.kind = 'all'; filters.q = ''; filters.from = ''; filters.to = '';
+      refreshFirstPage();
+    });
+
+    // --- Per-card actions (copy / rename / toggle-download / delete) ---
     list.addEventListener('click', async (e) => {
       const btn = e.target.closest('button, a');
       if (!btn) return;
+
       if (btn.classList.contains('copy-btn')) {
         const url = btn.dataset.url;
         try { await navigator.clipboard.writeText(url); const prev = btn.textContent; btn.textContent = 'Copied!'; setTimeout(() => btn.textContent = prev, 1500); }
@@ -862,25 +1026,6 @@ const RECENT_LIST_JS = `
         return;
       }
     });
-    const sentinel = document.getElementById('recent-sentinel');
-    if (!sentinel || !('IntersectionObserver' in window)) return;
-    let loading = false;
-    const io = new IntersectionObserver(async (entries) => {
-      for (const entry of entries) {
-        if (!entry.isIntersecting || loading) continue;
-        loading = true;
-        const cursor = sentinel.dataset.cursor;
-        try {
-          const res = await fetch('/api/recent?before=' + encodeURIComponent(cursor) + '&limit=${RECENT_PAGE_SIZE}', { credentials: 'same-origin' });
-          if (!res.ok) throw new Error('HTTP ' + res.status);
-          const data = await res.json();
-          if (data.html) list.insertAdjacentHTML('beforeend', data.html);
-          if (data.nextCursor == null) { io.disconnect(); sentinel.remove(); }
-          else { sentinel.dataset.cursor = data.nextCursor; loading = false; }
-        } catch { sentinel.textContent = 'Could not load more — scroll to retry.'; loading = false; }
-      }
-    }, { rootMargin: '200px 0px' });
-    io.observe(sentinel);
   })();
 `;
 
@@ -1080,9 +1225,24 @@ app.get('/f/:slug', async (req, res) => {
 
 app.get('/api/recent', requireUser, (req, res) => {
   const before = parseInt(req.query.before, 10);
-  if (!Number.isFinite(before) || before <= 0) return res.status(400).json({ error: 'before cursor required' });
   const limit = Math.max(1, Math.min(50, parseInt(req.query.limit, 10) || RECENT_PAGE_SIZE));
-  const rows = fdb.listRecentByUser(req.user.id, { before, limit });
+
+  // Accept optional filters. An empty / "all" kind means no filter on that
+  // column. Strings are trimmed and length-capped to keep LIKE reasonable.
+  const kind = ['image', 'video', 'audio', 'pdf', 'text'].includes(req.query.kind)
+    ? req.query.kind : null;
+  const q = (req.query.q || '').toString().trim().slice(0, 100) || null;
+  // Basic shape check on dates so a bogus value doesn't bake into the
+  // query. SQLite's date() is permissive but we want to fail fast here.
+  const dateOk = s => /^\d{4}-\d{2}-\d{2}$/.test(s);
+  const from = dateOk(req.query.from) ? req.query.from : null;
+  const to   = dateOk(req.query.to)   ? req.query.to   : null;
+
+  const rows = fdb.listRecentFilteredByUser(req.user.id, {
+    before: Number.isFinite(before) && before > 0 ? before : undefined,
+    limit,
+    kind, q, from, to,
+  });
   const nextCursor = rows.length === limit ? rows[rows.length - 1].id : null;
   res.json({ html: rows.map(renderRecentCard).join(''), nextCursor });
 });
