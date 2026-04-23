@@ -24,15 +24,20 @@ Coolify), different focus.
 - The owner picks per-file whether downloads are allowed. When off, no
   download button shows.
 
-## Per-type size limits (matches GHL)
+## Per-type size limits (matches GHL's **API** caps)
 
 | Kind   | Limit |
 | ------ | ----- |
-| Image  | 100 MB |
-| Audio  | 100 MB |
-| Video  | 4 GB |
-| PDF    | 100 MB |
-| Text   | 100 MB |
+| Image  | 25 MB |
+| Audio  | 25 MB |
+| Video  | 500 MB |
+| PDF    | 25 MB |
+| Text   | 25 MB |
+
+Note: GHL's dashboard UI accepts larger files (100 MB / 4 GB), but the
+`/medias/upload-file` API endpoint we use rejects anything over 25 MB
+for non-video and 500 MB for video. We match the API caps so uploads
+never pass client validation then fail server-side.
 
 Code and markup files (`.md`, `.js`, `.py`, …) get coerced to a `.txt`
 display name when uploaded to GHL — GHL rejects most code MIME types as

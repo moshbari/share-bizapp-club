@@ -485,34 +485,37 @@ function renderGuestLandingPage() {
     <main class="auth-main">
       <div class="auth-card" style="max-width:520px;">
         <div id="stage-drop">
-          <h2 class="auth-panel-title">Share a file — free</h2>
-          <p class="auth-panel-sub">Drop any file. We'll generate a share link and email it to you.</p>
+          <span class="free-pill">
+            <span class="free-pill-dot"></span>
+            100% FREE · No signup to upload
+          </span>
+          <h2 class="auth-panel-title">Share any file — free</h2>
+          <p class="auth-panel-sub">Drop a file below. We'll email your share link in seconds.</p>
 
           <form id="guestForm" class="auth-form" novalidate>
-            <div>
-              <div class="dropzone" id="dropzone">
-                <input id="guest-file" name="file" type="file" required>
-                <div class="dropzone-inner">
-                  <div class="dropzone-icon" id="dropzoneIcon">📤</div>
-                  <div class="dropzone-text">
-                    <strong>Drop a file here</strong>
-                    <span class="sub">or tap to choose</span>
-                  </div>
-                  <div class="dropzone-filename" id="dropzoneFilename"></div>
+            <div class="guest-dropzone" id="dropzone">
+              <input id="guest-file" name="file" type="file" required>
+              <div class="guest-dropzone-inner">
+                <div class="guest-dropzone-icon" id="dropzoneIcon">📤</div>
+                <div class="guest-dropzone-text">
+                  <strong>Drop your file here</strong>
+                  <span class="sub">or click to browse — any type, no account needed</span>
                 </div>
+                <div class="guest-dropzone-filename" id="dropzoneFilename"></div>
               </div>
-              <p class="muted" style="font-size:12px; margin:6px 0 0;">${escHtml(caps)}</p>
             </div>
+            <p class="guest-caps">${escHtml(caps)}</p>
 
-            <label class="checkbox-row" for="guest-allow-download" style="background:#f8fafc; border:1px solid #e5e7eb; border-radius:10px; padding:10px 14px; display:flex; gap:10px; cursor:pointer; align-items:center;">
-              <input id="guest-allow-download" name="allow_download" type="checkbox" checked style="width:18px; height:18px; margin:0;">
-              <span style="flex:1; font-weight:500; color:#0f172a;">Allow recipients to download
-                <span style="display:block; font-weight:400; font-size:13px; color:#64748b; margin-top:2px;">Turn off for preview-only share.</span>
+            <label class="guest-checkbox" for="guest-allow-download">
+              <input id="guest-allow-download" name="allow_download" type="checkbox" checked>
+              <span class="guest-checkbox-label">
+                Allow recipients to download
+                <span class="guest-checkbox-hint">Turn off for preview-only share.</span>
               </span>
             </label>
 
             <button type="submit" class="auth-submit auth-submit--cta" id="guest-submit">
-              Upload and get my link <span class="auth-submit-arrow">→</span>
+              Upload &amp; get my FREE link <span class="auth-submit-arrow">→</span>
             </button>
             <div class="progress" id="guest-progress" aria-live="polite" style="display:none;">
               <div class="progress-pct" id="guest-progress-pct">0%</div>
@@ -672,9 +675,12 @@ function renderGuestLandingPage() {
       stageDrop.style.display = 'none';
       stageEmail.style.display = '';
       const card = document.getElementById('summary-card');
+      card.className = 'summary-card';
       card.innerHTML =
-        '<div style="padding:12px 14px; background:#f1f5f9; border-radius:10px; font-size:13.5px; color:#334155; margin-bottom:12px;">' +
-          '<strong>' + data.kindEmoji + ' ' + data.title + '</strong> · ' + data.kind + ' · ' + fmtBytes(data.size) +
+        '<span class="summary-card-icon">' + data.kindEmoji + '</span>' +
+        '<div class="summary-card-text">' +
+          '<div class="summary-card-title">' + data.title + '</div>' +
+          '<div class="summary-card-meta">' + data.kind + ' · ' + fmtBytes(data.size) + ' · uploaded, ready to activate</div>' +
         '</div>';
     }
 
@@ -722,8 +728,109 @@ function renderGuestLandingPage() {
 </html>`;
 }
 
+// Guest landing page — dropzone + FREE marketing polish. These styles
+// are scoped to the landing page only so the authed /upload page keeps
+// its existing look. AUTH_CSS doesn't include dropzone styles because
+// /login and /signup don't have uploads — we add them here.
 const LANDING_CSS = `
-  .summary-card { margin-bottom: 12px; }
+  /* Prominent "100% FREE" pill above the upload card title */
+  .free-pill {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 6px 14px;
+    background: linear-gradient(90deg, #16a34a 0%, #22c55e 100%);
+    color: #fff;
+    border-radius: 99px;
+    font-size: 12.5px; font-weight: 700; letter-spacing: 0.06em;
+    text-transform: uppercase;
+    box-shadow: 0 2px 8px -2px rgba(22,163,74,0.45);
+    margin-bottom: 14px;
+  }
+  .free-pill-dot {
+    width: 7px; height: 7px; background: #fff; border-radius: 50%;
+    box-shadow: 0 0 0 3px rgba(255,255,255,0.35);
+    animation: freePulse 1.8s ease-in-out infinite;
+  }
+  @keyframes freePulse {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50%      { transform: scale(1.3); opacity: 0.8; }
+  }
+
+  /* Dropzone — the star of the landing page. Dashed border goes green
+     to match the free-tier language. Hover and drag-over states pop
+     warmly so users feel invited to drop. */
+  .guest-dropzone {
+    position: relative;
+    border: 2px dashed #cbd5e1;
+    border-radius: 14px;
+    background: #fff;
+    transition: border-color .2s, background-color .2s, transform .1s;
+    cursor: pointer;
+    overflow: hidden;
+    margin-bottom: 16px;
+  }
+  .guest-dropzone:hover { border-color: #16a34a; background: #f0fdf4; }
+  .guest-dropzone.is-dragover { border-color: #16a34a; background: #dcfce7; transform: scale(1.01); }
+  .guest-dropzone input[type="file"] {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    opacity: 0; cursor: pointer;
+  }
+  .guest-dropzone-inner {
+    padding: 44px 24px 40px; text-align: center; pointer-events: none;
+  }
+  .guest-dropzone-icon {
+    font-size: 52px; line-height: 1; margin-bottom: 12px;
+    display: inline-block; transition: transform .2s;
+  }
+  .guest-dropzone:hover .guest-dropzone-icon { transform: translateY(-2px); }
+  .guest-dropzone.has-file .guest-dropzone-icon { color: #16a34a; }
+  .guest-dropzone-text strong {
+    display: block;
+    font-size: 18px; font-weight: 600; color: #0f172a;
+    letter-spacing: -0.01em; margin-bottom: 4px;
+  }
+  .guest-dropzone-text .sub {
+    display: block;
+    font-size: 14px; color: #64748b;
+  }
+  .guest-dropzone-filename {
+    display: none; margin-top: 14px; padding: 8px 14px;
+    background: #dcfce7; color: #166534;
+    border-radius: 99px; font-weight: 600; font-size: 14px;
+    word-break: break-all;
+  }
+  .guest-dropzone.has-file .guest-dropzone-filename { display: inline-block; }
+
+  .guest-caps {
+    font-size: 12px; color: #94a3b8;
+    text-align: center; margin: 0 0 14px;
+    letter-spacing: 0.02em;
+  }
+
+  /* Download-toggle row — subtle so it doesn't compete with the dropzone */
+  .guest-checkbox {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 14px;
+    background: #f8fafc; border: 1px solid #e5e7eb;
+    border-radius: 10px; cursor: pointer;
+    margin-bottom: 8px;
+  }
+  .guest-checkbox input { width: 18px; height: 18px; margin: 0; flex: 0 0 auto; }
+  .guest-checkbox-label { flex: 1; font-weight: 500; color: #0f172a; font-size: 14px; }
+  .guest-checkbox-hint { display: block; font-weight: 400; font-size: 13px; color: #64748b; margin-top: 2px; }
+
+  /* Summary card shown on the email stage */
+  .summary-card {
+    padding: 14px 16px;
+    background: #f0fdf4; border: 1px solid #bbf7d0;
+    border-radius: 10px;
+    font-size: 14px; color: #166534;
+    margin-bottom: 16px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  .summary-card-icon { font-size: 22px; }
+  .summary-card-text { flex: 1; }
+  .summary-card-title { font-weight: 600; margin-bottom: 2px; color: #14532d; }
+  .summary-card-meta { font-size: 12.5px; color: #166534; opacity: 0.8; }
 `;
 
 // ---------- password reset ----------
