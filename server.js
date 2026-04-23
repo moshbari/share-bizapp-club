@@ -2845,11 +2845,19 @@ app.get('/api/admin/debug-pending', requireUser, requireAdmin, (req, res) => {
            substr(ghl_url,1,60) AS ghl_url
     FROM files WHERE activated = 0 ORDER BY id DESC LIMIT 20
   `).all();
+  const allFiles = raw.prepare(`
+    SELECT id, slug, guest_id, pending_email, user_id, activated, created_at
+    FROM files ORDER BY id DESC LIMIT 20
+  `).all();
   const recentMagic = raw.prepare(`
     SELECT id, email, guest_id, used_at, expires_at, created_at
     FROM magic_links ORDER BY id DESC LIMIT 20
   `).all();
-  res.json({ ok: true, pending, recentMagic, now_utc: new Date().toISOString() });
+  let bySlug = null;
+  if (req.query.slug) {
+    bySlug = raw.prepare(`SELECT * FROM files WHERE slug = ?`).get(req.query.slug) || null;
+  }
+  res.json({ ok: true, pending, allFiles, recentMagic, bySlug, now_utc: new Date().toISOString() });
 });
 
 // Admin-only force-activate: claim a pending file by slug to a user.
