@@ -1039,6 +1039,48 @@ app.get('/admin', requireUser, requireAdmin, (req, res) => {
         <div><strong>${counts.regular || 0}</strong> regular</div>
         <div><strong>${counts.deactivated || 0}</strong> deactivated</div>
       </div>
+
+      <details class="card" id="create-user-card">
+        <summary style="cursor: pointer; font-weight: 600; list-style: none; display: flex; align-items: center; gap: 8px;">
+          <span style="font-size: 18px;">➕</span>
+          <span>Create a new user</span>
+          <span class="muted" style="font-weight: 400; font-size: 13px;">— skip the signup flow, set type directly</span>
+        </summary>
+        <form id="create-user-form" class="stack" style="margin-top: 16px;">
+          <div class="row" style="gap: 12px;">
+            <div style="flex: 1 1 260px;">
+              <label for="new-name">Name</label>
+              <input id="new-name" name="name" type="text" required autocomplete="off">
+            </div>
+            <div style="flex: 1 1 260px;">
+              <label for="new-email">Email</label>
+              <input id="new-email" name="email" type="email" required autocomplete="off">
+            </div>
+          </div>
+          <div class="row" style="gap: 12px;">
+            <div style="flex: 1 1 260px;">
+              <label for="new-password">Password (min 8 chars)</label>
+              <input id="new-password" name="password" type="password" required minlength="8" autocomplete="new-password">
+            </div>
+            <div style="flex: 1 1 260px;">
+              <label for="new-type">User type</label>
+              <select id="new-type" name="type" style="width:100%; padding:12px 14px; font-size:16px; border:1px solid var(--border); border-radius:10px; background:#fff;">
+                <option value="trial">Trial — one file per kind</option>
+                <option value="regular" selected>Regular — unlimited uploads</option>
+                <option value="admin">Admin — full dashboard access</option>
+                <option value="deactivated">Deactivated — cannot log in</option>
+              </select>
+            </div>
+          </div>
+          <div class="row">
+            <button type="submit" class="btn">Create user</button>
+            <button type="reset" class="btn btn-secondary">Clear</button>
+          </div>
+          <p class="err" id="create-err" style="display:none;"></p>
+          <p class="ok" id="create-ok" style="display:none;"></p>
+        </form>
+      </details>
+
       <div class="card">
         <table class="users-table">
           <thead><tr><th>User</th><th>Status</th><th>Files</th><th>Joined</th><th>Actions</th></tr></thead>
@@ -1047,6 +1089,45 @@ app.get('/admin', requireUser, requireAdmin, (req, res) => {
       </div>
       <script>
         (function () {
+          // --- Create user form ---
+          const createForm = document.getElementById('create-user-form');
+          const createErr = document.getElementById('create-err');
+          const createOk = document.getElementById('create-ok');
+          if (createForm) {
+            createForm.addEventListener('submit', async (ev) => {
+              ev.preventDefault();
+              createErr.style.display = 'none';
+              createOk.style.display = 'none';
+              const payload = {
+                name: document.getElementById('new-name').value.trim(),
+                email: document.getElementById('new-email').value.trim(),
+                password: document.getElementById('new-password').value,
+                type: document.getElementById('new-type').value,
+              };
+              const submitBtn = createForm.querySelector('button[type="submit"]');
+              submitBtn.disabled = true;
+              try {
+                const res = await fetch('/admin/users', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  credentials: 'same-origin',
+                  body: JSON.stringify(payload),
+                });
+                const data = await res.json().catch(() => ({}));
+                if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+                createOk.textContent = 'Created ' + data.user.email + ' (' + payload.type + ').';
+                createOk.style.display = 'block';
+                // Reload so the new row appears in the users table and the
+                // summary counts update without us re-templating client-side.
+                setTimeout(() => location.reload(), 700);
+              } catch (err) {
+                createErr.textContent = err.message || 'Create failed';
+                createErr.style.display = 'block';
+                submitBtn.disabled = false;
+              }
+            });
+          }
+
           const tbody = document.getElementById('users-tbody');
           if (!tbody) return;
 
@@ -1106,6 +1187,27 @@ app.get('/admin', requireUser, requireAdmin, (req, res) => {
       </script>
     `,
   }));
+});
+
+// Admin-created account. Skips the public signup flow and lets admin set
+// the status (and admin flag) directly. "type" is a compact UI abstraction —
+// admin = status:regular + is_admin:1; everything else = that status + is_admin:0.
+app.post('/admin/users', requireUser, requireAdmin, express.json(), (req, res) => {
+  try {
+    const { name, email, password, type } = req.body || {};
+    const allowedTypes = ['trial', 'regular', 'admin', 'deactivated'];
+    if (!allowedTypes.includes(type)) {
+      return res.status(400).json({ ok: false, error: 'Invalid user type.' });
+    }
+    const status = type === 'admin' ? 'regular' : type;
+    const is_admin = type === 'admin';
+
+    const u = users.signup({ name, email, password, status, is_admin });
+    console.log(`[admin-create] ${req.user.email} created ${u.email} (type=${type})`);
+    res.status(201).json({ ok: true, user: u });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
+  }
 });
 
 app.post('/admin/users/:id/status', requireUser, requireAdmin, express.json(), (req, res) => {
