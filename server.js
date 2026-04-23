@@ -2176,6 +2176,14 @@ app.post('/api/upload', requireUser, upload.single('file'), async (req, res) => 
       uploadSize = fs.statSync(transcodedTmp).size;
       effectiveOriginalName = file.originalname.replace(/\.[^.]+$/, '') + '.mp3';
       console.log(`[upload] transcoded ${fmtBytes(file.size)} → ${fmtBytes(uploadSize)}`);
+      if (uploadSize > cls.maxBytes) {
+        try { fs.unlinkSync(transcodedTmp); } catch {}
+        throw new Error(
+          `This recording is too long for one upload — after converting to MP3 it's ` +
+          `${fmtBytes(uploadSize)} and the storage limit is ${fmtBytes(cls.maxBytes)}. ` +
+          `Trim it to under about 50 minutes and try again.`
+        );
+      }
     }
 
     // Pick the user's GHL config if they set one; otherwise fall back to
@@ -2278,6 +2286,14 @@ app.post('/api/guest-upload', guestRateLimit, upload.single('file'), async (req,
       uploadSize = fs.statSync(transcodedTmp).size;
       effectiveOriginalName = file.originalname.replace(/\.[^.]+$/, '') + '.mp3';
       console.log(`[guest-upload] transcoded ${fmtBytes(file.size)} → ${fmtBytes(uploadSize)}`);
+      if (uploadSize > cls.maxBytes) {
+        try { fs.unlinkSync(transcodedTmp); } catch {}
+        throw new Error(
+          `This recording is too long — after converting to MP3 it's ` +
+          `${fmtBytes(uploadSize)} and the storage limit is ${fmtBytes(cls.maxBytes)}. ` +
+          `Trim it to under about 50 minutes and try again.`
+        );
+      }
     }
 
     // Guest uploads always go to shared storage — they don't have a
