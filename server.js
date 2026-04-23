@@ -2835,6 +2835,47 @@ app.post('/admin/users/:id/delete', requireUser, requireAdmin, (req, res) => {
 
 app.get('/healthz', (req, res) => res.json({ ok: true, site: SITE_NAME }));
 
+// Admin-only DB peek for debugging the progressive-signup flow.
+// Returns the current state of pending (activated=0) files and the
+// most recent magic_links so we can match them up.
+app.get('/api/admin/debug-pending', requireUser, requireAdmin, (req, res) => {
+  const { raw } = require('./lib/db');
+  const pending = raw.prepare(`
+    SELECT id, slug, guest_id, pending_email, user_id, activated, created_at,
+           substr(ghl_url,1,60) AS ghl_url
+    FROM files WHERE activated = 0 ORDER BY id DESC LIMIT 20
+  `).all();
+  const recentMagic = raw.prepare(`
+    SELECT id, email, guest_id, used_at, expires_at, created_at
+    FROM magic_links ORDER BY id DESC LIMIT 20
+  `).all();
+  res.json({ ok: true, pending, recentMagic, now_utc: new Date().toISOString() });
+});
+
+// Admin-only force-activate: claim a pending file by slug to a user.
+// Useful when a magic-link click failed silently and we need to rescue
+// a file that's already uploaded.
+app.post('/api/admin/force-activate/:slug', requireUser, requireAdmin, express.json(), (req, res) => {
+  const { raw } = require('./lib/db');
+  const toEmail = (req.body && req.body.email || '').toLowerCase().trim();
+  if (!toEmail) return res.status(400).json({ ok: false, error: 'email required in body' });
+  let u = udb.getByEmail(toEmail);
+  if (!u) {
+    const id = udb.insert({
+      email: toEmail,
+      name: toEmail.split('@')[0],
+      password_hash: users.hashPassword(crypto.randomBytes(24).toString('base64url')),
+      status: 'trial', is_admin: 0,
+    });
+    u = udb.getById(id);
+  }
+  const info = raw.prepare(`
+    UPDATE files SET user_id = ?, activated = 1, guest_id = NULL, pending_email = NULL
+    WHERE slug = ? AND activated = 0
+  `).run(u.id, req.params.slug);
+  res.json({ ok: true, assignedTo: u.email, userId: u.id, changed: info.changes });
+});
+
 // Admin-only server-capacity snapshot. Runs `df` inside the container,
 // which sees the host's disk via the /app/data bind mount, so the
 // numbers for that path reflect the Hetzner VPS's real free space.
