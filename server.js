@@ -476,7 +476,7 @@ function renderMessageViewer(m, viewer) {
       <span class="mv-copy-label">Tap to copy message</span>
     </button>
 
-    <article class="mv-body-card" id="mvBody"></article>
+    <article class="mv-body-card" id="mvBody">${linkifyHtml(m.body)}</article>
 
     <p class="mv-hint">Then paste in Instagram, WhatsApp, Facebook DMs — anywhere.</p>
   </main>
@@ -490,10 +490,11 @@ function renderMessageViewer(m, viewer) {
   </div>
 
   <script>
-    // Inject body via JS (textContent) so we don't double-encode the
-    // original characters. JSON-decoded raw, then placed as text node.
+    // Body is server-side rendered with linkifyHtml — already in the
+    // DOM. The raw value lives only in this constant for the copy
+    // button so what hits the clipboard stays as plain text URLs
+    // (not the <a> markup).
     const raw = JSON.parse(${JSON.stringify(bodyJson)});
-    document.getElementById('mvBody').textContent = raw;
 
     async function doCopy(btn) {
       try {
@@ -589,6 +590,13 @@ const MSG_VIEWER_CSS = `
     /* Native font rendering — emojis show as the user's own emoji set */
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", Roboto, sans-serif;
   }
+  .mv-body-card a {
+    color: #2563eb; text-decoration: underline;
+    text-decoration-thickness: 1px;
+    text-underline-offset: 2px;
+    word-break: break-all;
+  }
+  .mv-body-card a:hover { color: #1d4ed8; text-decoration-thickness: 2px; }
 
   .mv-hint { margin: 14px 0 0; text-align: center; font-size: 13.5px; color: #64748b; }
 
@@ -1781,6 +1789,32 @@ function bodyPreview(body, max = 220) {
   return t.slice(0, max).trimEnd() + '…';
 }
 
+/**
+ * HTML-escape `text` and turn any http(s):// URL into an <a> opening
+ * in a new tab. Trailing punctuation (.,;:!?)]}) is kept OUTSIDE the
+ * link so a sentence-ending period or paren doesn't break the URL.
+ *
+ * Used for *display only*. The copy button reads from a separate
+ * data-body attribute that stores the original raw text, so what
+ * lands on the user's clipboard is still the plain URL they typed —
+ * not the HTML markup.
+ */
+function linkifyHtml(text) {
+  const URL_RE = /(https?:\/\/[^\s<>"]+?)([.,;:!?)\]}]*)(?=\s|$)/g;
+  let out = '';
+  let last = 0;
+  let m;
+  while ((m = URL_RE.exec(text)) !== null) {
+    out += escHtml(text.slice(last, m.index));
+    const escUrl = escHtml(m[1]);
+    out += `<a href="${escUrl}" target="_blank" rel="noopener noreferrer">${escUrl}</a>`;
+    out += escHtml(m[2]);
+    last = m.index + m[0].length;
+  }
+  out += escHtml(text.slice(last));
+  return out;
+}
+
 function renderMessageCard(m, publicOrigin) {
   const url = `${publicOrigin}/m/${m.slug}`;
   const title = m.title || '(untitled message)';
@@ -1794,7 +1828,7 @@ function renderMessageCard(m, publicOrigin) {
         <h3 class="msg-card-title">${escHtml(title)}</h3>
         <span class="msg-card-date">${escHtml(fmtMsgDate(m.updated_at || m.created_at))}</span>
       </div>
-      <pre class="msg-card-preview">${escHtml(preview)}</pre>
+      <pre class="msg-card-preview">${linkifyHtml(preview)}</pre>
       <button type="button" class="btn-copy-big" data-body='${escHtml(bodyJson)}'>
         <span class="btn-copy-icon">📋</span>
         <span class="btn-copy-label">Copy message</span>
@@ -2025,6 +2059,8 @@ const MESSAGES_CSS = `
     -webkit-mask-image: linear-gradient(180deg, #000 70%, transparent);
             mask-image: linear-gradient(180deg, #000 70%, transparent);
   }
+  .msg-card-preview a { color: #2563eb; text-decoration: underline; word-break: break-all; }
+  .msg-card-preview a:hover { color: #1d4ed8; }
 
   /* Big copy button — primary action on every message card. Min 56px
      tall so it's tappable on mobile. Gradient ramp matches the upload
