@@ -1983,13 +1983,13 @@ app.get('/messages/:slug/edit', requireUser, (req, res) => {
   }));
 });
 
-app.post('/api/messages', requireUser, express.json({ limit: '512kb' }), (req, res) => {
+app.post('/api/messages', requireUser, express.json({ limit: '2mb' }), (req, res) => {
   try {
     const title = ((req.body && req.body.title) || '').toString().trim();
     const body = ((req.body && req.body.body) || '').toString();
     if (!title) throw new Error('Title is required.');
     if (!body.trim()) throw new Error('Message body is required.');
-    if (body.length > 20000) throw new Error('Message is too long (max 20,000 characters).');
+    if (body.length > 200000) throw new Error('Message is too long (max 200,000 characters).');
     const slug = nanoid(8);
     mdb.insert({ slug, userId: req.user.id, title, body });
     console.log(`[msg] user=${req.user.id} created slug=${slug} (${body.length} chars)`);
@@ -1999,7 +1999,7 @@ app.post('/api/messages', requireUser, express.json({ limit: '512kb' }), (req, r
   }
 });
 
-app.post('/api/messages/:slug', requireUser, express.json({ limit: '512kb' }), (req, res) => {
+app.post('/api/messages/:slug', requireUser, express.json({ limit: '2mb' }), (req, res) => {
   try {
     const m = mdb.getBySlugForUser(req.params.slug, req.user.id);
     if (!m) return res.status(404).json({ ok: false, error: 'not found' });
@@ -2007,7 +2007,7 @@ app.post('/api/messages/:slug', requireUser, express.json({ limit: '512kb' }), (
     const body = ((req.body && req.body.body) || '').toString();
     if (!title) throw new Error('Title is required.');
     if (!body.trim()) throw new Error('Message body is required.');
-    if (body.length > 20000) throw new Error('Message is too long (max 20,000 characters).');
+    if (body.length > 200000) throw new Error('Message is too long (max 200,000 characters).');
     mdb.update(m.id, req.user.id, { title, body });
     res.json({ ok: true, slug: m.slug });
   } catch (err) {
