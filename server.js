@@ -188,7 +188,7 @@ const BASE_CSS = `
   .site-header .navlinks a, .site-header .navlinks form button { color: #cbd5e1; text-decoration: none; font-size: 14px; padding: 6px 10px; border-radius: 8px; border: 0; background: transparent; cursor: pointer; font-weight: 500; }
   .site-header .navlinks a:hover, .site-header .navlinks form button:hover { background: rgba(255,255,255,0.08); color: #fff; }
   .site-header .who { color: #94a3b8; font-size: 13px; padding: 6px 8px; }
-  main { max-width: 720px; margin: 0 auto; padding: 32px 20px 64px; }
+  main { max-width: 720px; margin: 0 auto; padding: 20px 20px 56px; }
   main.wide { max-width: 960px; }
   h1 { font-size: 28px; margin: 0 0 8px; }
   h2 { font-size: 20px; margin: 24px 0 8px; }
@@ -1870,10 +1870,20 @@ app.get('/messages', requireUser, (req, res) => {
       <p class="muted">Save your DMs once. Tap copy, paste anywhere — Instagram, WhatsApp, Facebook, anything.</p>
 
       ${justSavedSlug ? `
-        <div class="card" style="border-left: 4px solid var(--ok); background:#f0fdf4;">
+        <div class="card" id="saved-banner" style="border-left: 4px solid var(--ok); background:#f0fdf4;">
           <strong style="color:#166534;">Saved.</strong>
           <span class="muted" style="font-size:14px;">It's at the top of your list.</span>
         </div>
+        <script>
+          // One-shot banner — scrub the ?saved= param so a manual
+          // refresh or navigating-back doesn't replay it. Preserve
+          // any other params (e.g. ?q=foo) the user may have had.
+          try {
+            const u = new URL(location.href);
+            u.searchParams.delete('saved');
+            history.replaceState(null, '', u.pathname + (u.search || ''));
+          } catch (e) {}
+        </script>
       ` : ''}
 
       <form method="GET" action="/messages" class="msg-search">
