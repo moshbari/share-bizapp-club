@@ -1825,8 +1825,14 @@ function renderMessageCard(m, publicOrigin) {
   return `
     <div class="msg-card" data-id="${m.id}" data-slug="${escHtml(m.slug)}">
       <div class="msg-card-head">
-        <h3 class="msg-card-title">${escHtml(title)}</h3>
-        <span class="msg-card-date">${escHtml(fmtMsgDate(m.updated_at || m.created_at))}</span>
+        <div class="msg-card-head-text">
+          <h3 class="msg-card-title">${escHtml(title)}</h3>
+          <span class="msg-card-date">${escHtml(fmtMsgDate(m.updated_at || m.created_at))}</span>
+        </div>
+        <div class="msg-reorder" role="group" aria-label="Reorder">
+          <button type="button" class="msg-reorder-btn msg-up-btn"   aria-label="Move up"   title="Move up">↑</button>
+          <button type="button" class="msg-reorder-btn msg-down-btn" aria-label="Move down" title="Move down">↓</button>
+        </div>
       </div>
       <pre class="msg-card-preview">${linkifyHtml(preview)}</pre>
       <button type="button" class="btn-copy-big" data-body='${escHtml(bodyJson)}'>
@@ -2022,6 +2028,13 @@ app.post('/api/messages/:slug/delete', requireUser, (req, res) => {
   res.json({ ok: true });
 });
 
+app.post('/api/messages/:slug/move', requireUser, express.json(), (req, res) => {
+  const dir = (req.body && req.body.direction) === 'down' ? 'down' : 'up';
+  const result = mdb.move(req.params.slug, req.user.id, dir);
+  if (!result.ok) return res.status(400).json({ ok: false, error: result.reason });
+  res.json({ ok: true });
+});
+
 // Public message viewer — no auth, big copy CTA
 app.get('/m/:slug', (req, res) => {
   const m = mdb.getBySlug(req.params.slug);
@@ -2040,9 +2053,27 @@ const MESSAGES_CSS = `
   .msg-search input[type="text"]:focus { outline: 0; border-color: var(--brand); box-shadow: 0 0 0 4px rgba(37,99,235,0.12); }
 
   .msg-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 18px; margin-bottom: 14px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
-  .msg-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+  .msg-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 8px; flex-wrap: nowrap; }
+  .msg-card-head-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
   .msg-card-title { margin: 0; font-size: 17px; font-weight: 700; color: var(--fg); letter-spacing: -0.01em; word-break: break-word; }
   .msg-card-date { font-size: 12px; color: var(--muted); white-space: nowrap; }
+
+  /* Up/down reorder buttons. Stacked vertically, 36×36 each so they're
+     comfortably tappable on mobile. Subtle by default — they're a
+     control, not a CTA — but visibly an interactive element. */
+  .msg-reorder { display: flex; flex-direction: column; gap: 4px; flex: 0 0 auto; }
+  .msg-reorder-btn {
+    width: 36px; height: 36px; padding: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: #fff; border: 1px solid var(--border); border-radius: 8px;
+    font: 600 16px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: #475569; cursor: pointer;
+    transition: background-color .12s, border-color .12s, transform .08s;
+  }
+  .msg-reorder-btn:hover { background: #f3f4f6; border-color: #cbd5e1; color: #0f172a; }
+  .msg-reorder-btn:active { transform: scale(0.92); }
+  .msg-reorder-btn:disabled { opacity: 0.35; cursor: not-allowed; transform: none; }
+  .msg-card.is-moving { background-color: #f0fdf4; transition: background-color .35s; }
   .msg-card-preview {
     margin: 0 0 14px;
     padding: 10px 12px;
@@ -2140,6 +2171,42 @@ const MSG_LIST_JS = `
           btn.textContent = 'Link copied!';
           setTimeout(() => { btn.textContent = prev; }, 1500);
         } catch { btn.textContent = 'Copy failed'; }
+        return;
+      }
+
+      // Move up / down — swap with the adjacent card in the DOM,
+      // then fire-and-forget the API call. We do the DOM swap first
+      // so the UI feels instant; on API failure we revert.
+      if (btn.classList.contains('msg-reorder-btn')) {
+        const dir = btn.classList.contains('msg-up-btn') ? 'up' : 'down';
+        const sibling = dir === 'up'
+          ? card.previousElementSibling
+          : card.nextElementSibling;
+        if (!sibling || !sibling.classList || !sibling.classList.contains('msg-card')) {
+          return; // already at edge — silently no-op
+        }
+        // Optimistic DOM swap
+        if (dir === 'up') card.parentNode.insertBefore(card, sibling);
+        else              card.parentNode.insertBefore(sibling, card);
+        card.classList.add('is-moving');
+        setTimeout(() => card.classList.remove('is-moving'), 600);
+        try {
+          const res = await fetch('/api/messages/' + card.dataset.slug + '/move', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ direction: dir }), credentials: 'same-origin',
+          });
+          if (!res.ok) {
+            // Revert on failure
+            if (dir === 'up') card.parentNode.insertBefore(sibling, card);
+            else              card.parentNode.insertBefore(card, sibling);
+            const data = await res.json().catch(() => ({}));
+            alert(data.error || 'Move failed.');
+          }
+        } catch (e) {
+          if (dir === 'up') card.parentNode.insertBefore(sibling, card);
+          else              card.parentNode.insertBefore(card, sibling);
+          alert('Move failed (network).');
+        }
         return;
       }
 
