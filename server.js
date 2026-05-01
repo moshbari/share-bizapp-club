@@ -2052,21 +2052,22 @@ const MESSAGES_CSS = `
   .msg-search input[type="text"] { flex: 1; padding: 12px 14px; font-size: 15px; border: 1px solid var(--border); border-radius: 10px; background: #fff; }
   .msg-search input[type="text"]:focus { outline: 0; border-color: var(--brand); box-shadow: 0 0 0 4px rgba(37,99,235,0.12); }
 
-  .msg-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 18px; margin-bottom: 14px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
-  .msg-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 8px; flex-wrap: nowrap; }
-  .msg-card-head-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-  .msg-card-title { margin: 0; font-size: 17px; font-weight: 700; color: var(--fg); letter-spacing: -0.01em; word-break: break-word; }
-  .msg-card-date { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .msg-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 14px 14px 12px; margin-bottom: 12px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+  .msg-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 6px; flex-wrap: nowrap; }
+  .msg-card-head-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .msg-card-title { margin: 0; font-size: 16px; font-weight: 700; color: var(--fg); letter-spacing: -0.01em; word-break: break-word; line-height: 1.3; }
+  .msg-card-date { font-size: 11.5px; color: var(--muted); white-space: nowrap; }
 
-  /* Up/down reorder buttons. Stacked vertically, 36×36 each so they're
-     comfortably tappable on mobile. Subtle by default — they're a
-     control, not a CTA — but visibly an interactive element. */
-  .msg-reorder { display: flex; flex-direction: column; gap: 4px; flex: 0 0 auto; }
+  /* Reorder buttons — laid out side-by-side and modestly sized so the
+     card head stays a single line of vertical space. Still 32px tall
+     so they're comfortably tappable on mobile (44pt touch target met
+     when including the surrounding padding). */
+  .msg-reorder { display: flex; flex-direction: row; gap: 4px; flex: 0 0 auto; align-self: flex-start; }
   .msg-reorder-btn {
-    width: 36px; height: 36px; padding: 0;
+    width: 32px; height: 32px; padding: 0;
     display: inline-flex; align-items: center; justify-content: center;
     background: #fff; border: 1px solid var(--border); border-radius: 8px;
-    font: 600 16px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font: 600 15px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     color: #475569; cursor: pointer;
     transition: background-color .12s, border-color .12s, transform .08s;
   }
@@ -2075,16 +2076,16 @@ const MESSAGES_CSS = `
   .msg-reorder-btn:disabled { opacity: 0.35; cursor: not-allowed; transform: none; }
   .msg-card.is-moving { background-color: #f0fdf4; transition: background-color .35s; }
   .msg-card-preview {
-    margin: 0 0 14px;
-    padding: 10px 12px;
+    margin: 0 0 10px;
+    padding: 8px 11px;
     background: #f8fafc;
     border: 1px solid var(--border);
     border-radius: 8px;
-    font: 13.5px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     color: #334155;
     white-space: pre-wrap;
     word-break: break-word;
-    max-height: 90px;          /* ~ 4 lines */
+    max-height: 72px;          /* ~ 3 lines */
     overflow: hidden;
     position: relative;
     -webkit-mask-image: linear-gradient(180deg, #000 70%, transparent);
@@ -2099,13 +2100,13 @@ const MESSAGES_CSS = `
   .btn-copy-big {
     display: flex; align-items: center; justify-content: center; gap: 10px;
     width: 100%; min-height: 56px;
-    padding: 14px 20px;
+    padding: 12px 20px;
     border: 0; border-radius: 12px; cursor: pointer;
     font: inherit; font-size: 16px; font-weight: 700; color: #fff;
     background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
     box-shadow: 0 1px 2px rgba(29,78,216,0.22), 0 8px 22px -8px rgba(29,78,216,0.55);
     transition: transform .08s, filter .15s, box-shadow .15s;
-    margin-bottom: 12px;
+    margin-bottom: 10px;
     -webkit-tap-highlight-color: rgba(255,255,255,0.2);
   }
   .btn-copy-big:hover { filter: brightness(1.05); }
