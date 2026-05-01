@@ -17,7 +17,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 
-const { users: udb, files: fdb, passwordResets: prdb, magicLinks: mldb } = require('./lib/db');
+const { users: udb, files: fdb, passwordResets: prdb, magicLinks: mldb, messages: mdb } = require('./lib/db');
 const users = require('./lib/users');
 const ghl = require('./lib/ghl');
 const transcode = require('./lib/transcode');
@@ -322,6 +322,7 @@ function renderNav(user) {
     <div class="navlinks">
       <span class="who">${escHtml(user.name || user.email)}</span>
       <a href="/upload">Upload</a>
+      <a href="/messages">Messages</a>
       <a href="/account">Account</a>
       ${adminLink}
       <form method="POST" action="/logout" style="display:inline;"><button type="submit">Log out</button></form>
@@ -437,6 +438,180 @@ app.get('/signup', (req, res) => {
     signupErr: err,
   }));
 });
+
+// ---------- public message viewer ----------
+//
+// Standalone, no app chrome. Title big, copy button enormous and
+// reachable on mobile (60px+ tall, sticky on long messages so the
+// user never has to scroll-then-tap). Body in a clean reading card
+// preserving whitespace and emojis exactly.
+
+function renderMessageViewer(m, viewer) {
+  const title = m.title || 'Shared message';
+  const bodyJson = JSON.stringify(m.body);
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>${escHtml(title)} — ${escHtml(SITE_NAME)}</title>
+  <meta name="robots" content="noindex,nofollow">
+  <meta property="og:title" content="${escHtml(title)}">
+  <meta property="og:description" content="Tap to copy — ready to paste in DMs.">
+  <style>${MSG_VIEWER_CSS}</style>
+</head>
+<body class="mv-body">
+  <header class="mv-header">
+    <a href="/" class="mv-brand">
+      <span class="mv-brand-mark">📤</span>
+      <span>${escHtml(SITE_NAME)}</span>
+    </a>
+  </header>
+
+  <main class="mv-main">
+    <h1 class="mv-title">${escHtml(title)}</h1>
+
+    <button type="button" class="mv-copy" id="mvCopy" data-body='${escHtml(bodyJson)}'>
+      <span class="mv-copy-icon">📋</span>
+      <span class="mv-copy-label">Tap to copy message</span>
+    </button>
+
+    <article class="mv-body-card" id="mvBody"></article>
+
+    <p class="mv-hint">Then paste in Instagram, WhatsApp, Facebook DMs — anywhere.</p>
+  </main>
+
+  <!-- Sticky copy bar on mobile, only after the user scrolls past the top button -->
+  <div class="mv-sticky" id="mvSticky" aria-hidden="true">
+    <button type="button" class="mv-copy mv-copy--sticky" id="mvCopySticky" data-body='${escHtml(bodyJson)}'>
+      <span class="mv-copy-icon">📋</span>
+      <span class="mv-copy-label">Copy message</span>
+    </button>
+  </div>
+
+  <script>
+    // Inject body via JS (textContent) so we don't double-encode the
+    // original characters. JSON-decoded raw, then placed as text node.
+    const raw = JSON.parse(${JSON.stringify(bodyJson)});
+    document.getElementById('mvBody').textContent = raw;
+
+    async function doCopy(btn) {
+      try {
+        await navigator.clipboard.writeText(raw);
+        btn.classList.add('is-copied');
+        const label = btn.querySelector('.mv-copy-label');
+        const icon  = btn.querySelector('.mv-copy-icon');
+        const pl = label.textContent, pi = icon.textContent;
+        label.textContent = 'Copied — paste anywhere now';
+        icon.textContent = '✓';
+        if (navigator.vibrate) { try { navigator.vibrate(15); } catch {} }
+        setTimeout(() => {
+          btn.classList.remove('is-copied');
+          label.textContent = pl; icon.textContent = pi;
+        }, 2200);
+      } catch (e) {
+        alert('Copy failed — long-press the message text to copy manually.');
+      }
+    }
+    document.getElementById('mvCopy').addEventListener('click', e => doCopy(e.currentTarget));
+    document.getElementById('mvCopySticky').addEventListener('click', e => doCopy(e.currentTarget));
+
+    // Reveal the sticky copy bar only after the top one scrolls out of view
+    const topBtn = document.getElementById('mvCopy');
+    const sticky = document.getElementById('mvSticky');
+    if ('IntersectionObserver' in window) {
+      const io = new IntersectionObserver(entries => {
+        for (const e of entries) {
+          sticky.classList.toggle('is-visible', !e.isIntersecting);
+        }
+      }, { rootMargin: '-80px 0px 0px 0px' });
+      io.observe(topBtn);
+    }
+  </script>
+</body>
+</html>`;
+}
+
+const MSG_VIEWER_CSS = `
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  .mv-body {
+    font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    color: #0f172a;
+    background: linear-gradient(180deg, #fafbff 0%, #f3f5fb 100%);
+    min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+    padding-bottom: 96px;     /* room for sticky bar */
+  }
+  .mv-header { background: #0f172a; padding: 12px 20px; }
+  .mv-brand { display: inline-flex; align-items: center; gap: 8px; color: #fff; text-decoration: none; font-weight: 700; font-size: 17px; letter-spacing: -0.01em; }
+  .mv-brand-mark { font-size: 20px; line-height: 1; }
+
+  .mv-main { max-width: 640px; margin: 0 auto; padding: 28px 20px 24px; }
+
+  .mv-title {
+    margin: 0 0 18px;
+    font-size: 26px; font-weight: 700; letter-spacing: -0.02em;
+    word-break: break-word;
+  }
+
+  /* Hero copy button. 64px tall on desktop, 60px on mobile, full-width
+     always. Gradient + soft glow + arrow that nudges on hover. */
+  .mv-copy {
+    display: flex; align-items: center; justify-content: center; gap: 12px;
+    width: 100%; min-height: 64px;
+    padding: 16px 22px; margin: 0 0 18px;
+    border: 0; border-radius: 14px; cursor: pointer;
+    font: inherit; font-size: 18px; font-weight: 700; color: #fff;
+    background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
+    box-shadow: 0 1px 2px rgba(29,78,216,0.22), 0 12px 28px -10px rgba(29,78,216,0.6);
+    transition: transform .08s, filter .15s, box-shadow .15s, background .2s;
+    -webkit-tap-highlight-color: rgba(255,255,255,0.2);
+  }
+  .mv-copy:hover { filter: brightness(1.05); }
+  .mv-copy:active { transform: scale(0.985); }
+  .mv-copy.is-copied {
+    background: linear-gradient(180deg, #16a34a 0%, #15803d 100%);
+    box-shadow: 0 1px 2px rgba(22,163,74,0.25), 0 12px 28px -10px rgba(22,163,74,0.65);
+  }
+  .mv-copy-icon { font-size: 26px; line-height: 1; }
+
+  .mv-body-card {
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-radius: 14px;
+    padding: 20px 22px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 16px; line-height: 1.6;
+    color: #0f172a;
+    /* Native font rendering — emojis show as the user's own emoji set */
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", Roboto, sans-serif;
+  }
+
+  .mv-hint { margin: 14px 0 0; text-align: center; font-size: 13.5px; color: #64748b; }
+
+  /* Mobile sticky bar — only shows after the top button scrolls off */
+  .mv-sticky {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    padding: 10px 16px calc(10px + env(safe-area-inset-bottom));
+    background: rgba(255,255,255,0.92);
+    backdrop-filter: blur(10px);
+    border-top: 1px solid #e5e7eb;
+    transform: translateY(100%);
+    transition: transform .2s ease-out;
+    z-index: 50;
+  }
+  .mv-sticky.is-visible { transform: translateY(0); }
+  .mv-copy--sticky { min-height: 56px; padding: 12px 18px; margin: 0; max-width: 640px; margin: 0 auto; font-size: 16px; }
+
+  @media (min-width: 720px) {
+    /* On desktop the top button is always reachable; suppress sticky */
+    .mv-sticky { display: none; }
+    .mv-body { padding-bottom: 24px; }
+  }
+`;
 
 // ---------- guest landing page ----------
 //
@@ -1589,6 +1764,366 @@ app.post('/account/ghl-settings/clear', requireUser, (req, res) => {
   console.log(`[ghl-cfg] user=${req.user.id} reverted to shared`);
   return res.redirect('/account?ghl=cleared');
 });
+
+// ---------- messages (DM/snippet library) ----------
+//
+// User saves formatted messages once, taps a big copy button to
+// drop the exact text into Instagram / WhatsApp / Facebook DMs.
+// Public viewer at /m/<slug> exposes the same copy button so a
+// teammate can be sent the URL and copy the message themselves.
+
+const MSG_PAGE_SIZE = 20;
+
+function fmtMsgDate(s) { return fmtGstTimestamp(s); }
+function bodyPreview(body, max = 220) {
+  const t = (body || '').toString();
+  if (t.length <= max) return t;
+  return t.slice(0, max).trimEnd() + '…';
+}
+
+function renderMessageCard(m, publicOrigin) {
+  const url = `${publicOrigin}/m/${m.slug}`;
+  const title = m.title || '(untitled message)';
+  const preview = bodyPreview(m.body, 240);
+  // JSON-encode the body so the data attribute survives quotes,
+  // newlines, emojis, everything. Decoded back via JSON.parse.
+  const bodyJson = JSON.stringify(m.body);
+  return `
+    <div class="msg-card" data-id="${m.id}" data-slug="${escHtml(m.slug)}">
+      <div class="msg-card-head">
+        <h3 class="msg-card-title">${escHtml(title)}</h3>
+        <span class="msg-card-date">${escHtml(fmtMsgDate(m.updated_at || m.created_at))}</span>
+      </div>
+      <pre class="msg-card-preview">${escHtml(preview)}</pre>
+      <button type="button" class="btn-copy-big" data-body='${escHtml(bodyJson)}'>
+        <span class="btn-copy-icon">📋</span>
+        <span class="btn-copy-label">Copy message</span>
+      </button>
+      <div class="msg-card-actions">
+        <a class="btn btn-secondary btn-sm" href="/m/${escHtml(m.slug)}" target="_blank" rel="noopener">Open</a>
+        <a class="btn btn-secondary btn-sm" href="/messages/${escHtml(m.slug)}/edit">Edit</a>
+        <button type="button" class="btn btn-secondary btn-sm copy-link-btn" data-url="${escHtml(url)}">Copy link</button>
+        <button type="button" class="btn btn-danger btn-sm msg-delete-btn">Delete</button>
+      </div>
+    </div>
+  `;
+}
+
+app.get('/messages', requireUser, (req, res) => {
+  const q = (req.query.q || '').toString().trim().slice(0, 100);
+  const firstPage = mdb.listRecentByUser(req.user.id, { limit: MSG_PAGE_SIZE, q });
+  const nextCursor = firstPage.length === MSG_PAGE_SIZE
+    ? firstPage[firstPage.length - 1].id : null;
+  const hasAny = firstPage.length > 0 || q;
+
+  const justSavedSlug = req.query.saved ? req.query.saved.toString().slice(0, 32) : '';
+
+  res.send(layout({
+    title: 'Messages — ' + SITE_NAME,
+    user: req.user,
+    body: `
+      <style>${MESSAGES_CSS}</style>
+      <div class="msg-page-head">
+        <h1>Messages</h1>
+        <a href="/messages/new" class="btn">+ New message</a>
+      </div>
+      <p class="muted">Save your DMs once. Tap copy, paste anywhere — Instagram, WhatsApp, Facebook, anything.</p>
+
+      ${justSavedSlug ? `
+        <div class="card" style="border-left: 4px solid var(--ok); background:#f0fdf4;">
+          <strong style="color:#166534;">Saved.</strong>
+          <span class="muted" style="font-size:14px;">It's at the top of your list.</span>
+        </div>
+      ` : ''}
+
+      <form method="GET" action="/messages" class="msg-search">
+        <input type="text" name="q" value="${escHtml(q)}" placeholder="Search title or body…" autocomplete="off">
+        ${q ? `<a href="/messages" class="btn btn-secondary btn-sm">Clear</a>` : ''}
+      </form>
+
+      <div id="msg-list">
+        ${firstPage.length === 0
+          ? `<div class="recent-empty">${q
+              ? 'No messages match that search.'
+              : 'No saved messages yet. Click <a href="/messages/new">+ New message</a> to start.'}</div>`
+          : firstPage.map(m => renderMessageCard(m, PUBLIC_ORIGIN)).join('')}
+      </div>
+      ${nextCursor != null ? `<div id="msg-sentinel" data-cursor="${nextCursor}" class="muted" style="text-align: center; padding: 16px;">Loading more…</div>` : ''}
+
+      <script>${MSG_LIST_JS}</script>
+    `,
+  }));
+});
+
+app.get('/messages/new', requireUser, (req, res) => {
+  res.send(layout({
+    title: 'New message — ' + SITE_NAME,
+    user: req.user,
+    body: `
+      <style>${MESSAGES_CSS}</style>
+      <h1>New message</h1>
+      <p class="muted">Type the exact message you'll paste. Multi-paragraph + emojis preserved.</p>
+      <form method="POST" action="/api/messages" class="card stack" id="msgForm">
+        <div>
+          <label for="title">Title (so you can find it later)</label>
+          <input id="title" name="title" type="text" required autofocus maxlength="200" placeholder="e.g. New lead intro DM">
+        </div>
+        <div>
+          <label for="body">Message</label>
+          <textarea id="body" name="body" required rows="14" placeholder="Write your message exactly as you'd paste it…"></textarea>
+          <p class="muted" style="font-size:12px; margin:6px 0 0;">Line breaks, emojis, everything is preserved.</p>
+        </div>
+        <button type="submit" class="btn btn-block">Save message</button>
+        <p class="err" id="formErr" style="display:none;"></p>
+        <p class="muted" style="text-align:center; font-size:14px; margin:0;"><a href="/messages">← Back to messages</a></p>
+      </form>
+      <script>
+        document.getElementById('msgForm').addEventListener('submit', async (ev) => {
+          ev.preventDefault();
+          const errEl = document.getElementById('formErr');
+          errEl.style.display = 'none';
+          const fd = new FormData(ev.target);
+          const body = { title: fd.get('title'), body: fd.get('body') };
+          try {
+            const res = await fetch('/api/messages', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body), credentials: 'same-origin',
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.error || 'Save failed');
+            location.href = '/messages?saved=' + encodeURIComponent(data.slug);
+          } catch (e) {
+            errEl.textContent = e.message; errEl.style.display = 'block';
+          }
+        });
+      </script>
+    `,
+  }));
+});
+
+app.get('/messages/:slug/edit', requireUser, (req, res) => {
+  const m = mdb.getBySlugForUser(req.params.slug, req.user.id);
+  if (!m) {
+    return res.status(404).send(layout({ title: 'Not found', user: req.user, body: '<h1>Not found</h1><p>This message does not exist or is not yours.</p>' }));
+  }
+  res.send(layout({
+    title: 'Edit message — ' + SITE_NAME,
+    user: req.user,
+    body: `
+      <style>${MESSAGES_CSS}</style>
+      <h1>Edit message</h1>
+      <form method="POST" action="/api/messages/${escHtml(m.slug)}" class="card stack" id="msgForm">
+        <div>
+          <label for="title">Title</label>
+          <input id="title" name="title" type="text" required autofocus maxlength="200" value="${escHtml(m.title)}">
+        </div>
+        <div>
+          <label for="body">Message</label>
+          <textarea id="body" name="body" required rows="14">${escHtml(m.body)}</textarea>
+        </div>
+        <button type="submit" class="btn btn-block">Save changes</button>
+        <p class="err" id="formErr" style="display:none;"></p>
+        <p class="muted" style="text-align:center; font-size:14px; margin:0;"><a href="/messages">← Back to messages</a></p>
+      </form>
+      <script>
+        document.getElementById('msgForm').addEventListener('submit', async (ev) => {
+          ev.preventDefault();
+          const errEl = document.getElementById('formErr');
+          errEl.style.display = 'none';
+          const fd = new FormData(ev.target);
+          const body = { title: fd.get('title'), body: fd.get('body') };
+          try {
+            const res = await fetch('/api/messages/${escHtml(m.slug)}', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body), credentials: 'same-origin',
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.error || 'Save failed');
+            location.href = '/messages?saved=' + encodeURIComponent('${escHtml(m.slug)}');
+          } catch (e) {
+            errEl.textContent = e.message; errEl.style.display = 'block';
+          }
+        });
+      </script>
+    `,
+  }));
+});
+
+app.post('/api/messages', requireUser, express.json({ limit: '512kb' }), (req, res) => {
+  try {
+    const title = ((req.body && req.body.title) || '').toString().trim();
+    const body = ((req.body && req.body.body) || '').toString();
+    if (!title) throw new Error('Title is required.');
+    if (!body.trim()) throw new Error('Message body is required.');
+    if (body.length > 20000) throw new Error('Message is too long (max 20,000 characters).');
+    const slug = nanoid(8);
+    mdb.insert({ slug, userId: req.user.id, title, body });
+    console.log(`[msg] user=${req.user.id} created slug=${slug} (${body.length} chars)`);
+    res.json({ ok: true, slug });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/api/messages/:slug', requireUser, express.json({ limit: '512kb' }), (req, res) => {
+  try {
+    const m = mdb.getBySlugForUser(req.params.slug, req.user.id);
+    if (!m) return res.status(404).json({ ok: false, error: 'not found' });
+    const title = ((req.body && req.body.title) || '').toString().trim();
+    const body = ((req.body && req.body.body) || '').toString();
+    if (!title) throw new Error('Title is required.');
+    if (!body.trim()) throw new Error('Message body is required.');
+    if (body.length > 20000) throw new Error('Message is too long (max 20,000 characters).');
+    mdb.update(m.id, req.user.id, { title, body });
+    res.json({ ok: true, slug: m.slug });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
+app.post('/api/messages/:slug/delete', requireUser, (req, res) => {
+  const m = mdb.getBySlugForUser(req.params.slug, req.user.id);
+  if (!m) return res.status(404).json({ ok: false, error: 'not found' });
+  mdb.deleteByIdForUser(m.id, req.user.id);
+  res.json({ ok: true });
+});
+
+// Public message viewer — no auth, big copy CTA
+app.get('/m/:slug', (req, res) => {
+  const m = mdb.getBySlug(req.params.slug);
+  if (!m) {
+    return res.status(404).send(layout({ title: 'Not found', user: req.user, body: '<h1>Not found</h1><p>This message link does not exist or was removed.</p>' }));
+  }
+  res.set('X-Robots-Tag', 'noindex, nofollow');
+  res.send(renderMessageViewer(m, req.user));
+});
+
+const MESSAGES_CSS = `
+  .msg-page-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
+  .msg-page-head h1 { margin: 0; }
+  .msg-search { display: flex; gap: 8px; margin: 16px 0; }
+  .msg-search input[type="text"] { flex: 1; padding: 12px 14px; font-size: 15px; border: 1px solid var(--border); border-radius: 10px; background: #fff; }
+  .msg-search input[type="text"]:focus { outline: 0; border-color: var(--brand); box-shadow: 0 0 0 4px rgba(37,99,235,0.12); }
+
+  .msg-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 18px; margin-bottom: 14px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+  .msg-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+  .msg-card-title { margin: 0; font-size: 17px; font-weight: 700; color: var(--fg); letter-spacing: -0.01em; word-break: break-word; }
+  .msg-card-date { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .msg-card-preview {
+    margin: 0 0 14px;
+    padding: 10px 12px;
+    background: #f8fafc;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    font: 13.5px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: #334155;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 90px;          /* ~ 4 lines */
+    overflow: hidden;
+    position: relative;
+    -webkit-mask-image: linear-gradient(180deg, #000 70%, transparent);
+            mask-image: linear-gradient(180deg, #000 70%, transparent);
+  }
+
+  /* Big copy button — primary action on every message card. Min 56px
+     tall so it's tappable on mobile. Gradient ramp matches the upload
+     CTA so the visual language is consistent across the product. */
+  .btn-copy-big {
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+    width: 100%; min-height: 56px;
+    padding: 14px 20px;
+    border: 0; border-radius: 12px; cursor: pointer;
+    font: inherit; font-size: 16px; font-weight: 700; color: #fff;
+    background: linear-gradient(180deg, #2563eb 0%, #1d4ed8 100%);
+    box-shadow: 0 1px 2px rgba(29,78,216,0.22), 0 8px 22px -8px rgba(29,78,216,0.55);
+    transition: transform .08s, filter .15s, box-shadow .15s;
+    margin-bottom: 12px;
+    -webkit-tap-highlight-color: rgba(255,255,255,0.2);
+  }
+  .btn-copy-big:hover { filter: brightness(1.05); }
+  .btn-copy-big:active { transform: scale(0.985); }
+  .btn-copy-big.is-copied {
+    background: linear-gradient(180deg, #16a34a 0%, #15803d 100%);
+    box-shadow: 0 1px 2px rgba(22,163,74,0.22), 0 8px 22px -8px rgba(22,163,74,0.55);
+  }
+  .btn-copy-icon { font-size: 22px; line-height: 1; }
+  .btn-copy-label { letter-spacing: 0.01em; }
+
+  .msg-card-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .msg-card-actions .btn-sm { flex: 1 1 auto; }
+
+  .recent-empty { text-align: center; padding: 40px 20px; color: var(--muted); font-size: 15px; }
+
+  textarea {
+    display: block; width: 100%;
+    padding: 12px 14px; font: inherit; font-size: 15px; line-height: 1.5;
+    border: 1px solid var(--border); border-radius: 10px; background: #fff; color: var(--fg);
+    transition: border-color .15s, box-shadow .15s; resize: vertical;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  textarea:hover { border-color: #cbd5e1; }
+  textarea:focus { outline: 0; border-color: var(--brand); box-shadow: 0 0 0 4px rgba(37,99,235,0.12); }
+`;
+
+const MSG_LIST_JS = `
+  (function () {
+    const list = document.getElementById('msg-list');
+    if (!list) return;
+
+    list.addEventListener('click', async (e) => {
+      const btn = e.target.closest('button, a');
+      if (!btn) return;
+      const card = btn.closest('.msg-card');
+
+      // Big primary copy
+      if (btn.classList.contains('btn-copy-big')) {
+        try {
+          const body = JSON.parse(btn.dataset.body);
+          await navigator.clipboard.writeText(body);
+          btn.classList.add('is-copied');
+          const label = btn.querySelector('.btn-copy-label');
+          const icon = btn.querySelector('.btn-copy-icon');
+          const prevLabel = label.textContent; const prevIcon = icon.textContent;
+          label.textContent = 'Copied — paste anywhere'; icon.textContent = '✓';
+          setTimeout(() => {
+            btn.classList.remove('is-copied');
+            label.textContent = prevLabel; icon.textContent = prevIcon;
+          }, 2000);
+        } catch (err) {
+          alert('Copy failed — long-press the message to copy manually.');
+        }
+        return;
+      }
+
+      // Copy link
+      if (btn.classList.contains('copy-link-btn')) {
+        try {
+          await navigator.clipboard.writeText(btn.dataset.url);
+          const prev = btn.textContent;
+          btn.textContent = 'Link copied!';
+          setTimeout(() => { btn.textContent = prev; }, 1500);
+        } catch { btn.textContent = 'Copy failed'; }
+        return;
+      }
+
+      // Delete
+      if (btn.classList.contains('msg-delete-btn')) {
+        const title = card.querySelector('.msg-card-title').textContent.trim();
+        if (!confirm('Delete "' + title + '"?\\n\\nThis can\\'t be undone.')) return;
+        btn.disabled = true; btn.textContent = 'Deleting…';
+        try {
+          const res = await fetch('/api/messages/' + card.dataset.slug + '/delete', {
+            method: 'POST', credentials: 'same-origin',
+          });
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          card.remove();
+        } catch { btn.disabled = false; btn.textContent = 'Delete'; alert('Delete failed.'); }
+        return;
+      }
+    });
+  })();
+`;
 
 // ---------- upload page ----------
 
