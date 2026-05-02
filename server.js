@@ -349,7 +349,7 @@ function layout({ title, body, user, ogTitle, ogDescription, ogImageUrl, noindex
   <title>${escHtml(title)}</title>
   ${noindex ? '<meta name="robots" content="noindex,nofollow">' : ''}
   ${og}
-  <style>${BASE_CSS}</style>
+  <style>${BASE_CSS}${DEL_MODAL_CSS}</style>
 </head>
 <body>
   <header class="site-header">
@@ -362,9 +362,150 @@ function layout({ title, body, user, ogTitle, ogDescription, ogImageUrl, noindex
   <main${wide ? ' class="wide"' : ''}>
     ${body}
   </main>
+  ${DEL_MODAL_HTML}
+  <script>${DEL_MODAL_JS}</script>
 </body>
 </html>`;
 }
+
+// ---------- shared permanent-delete modal ----------
+//
+// Every destructive action in the app calls window.__confirmDelete()
+// instead of the browser's native confirm(). The modal forces the
+// user to tick a checkbox acknowledging the permanence — there is
+// no path to the red Delete button without it. Cancel is the
+// default focused control on open so an accidental Enter doesn't
+// trigger destruction.
+
+const DEL_MODAL_HTML = `
+  <div class="del-modal-backdrop" id="del-modal" hidden role="dialog" aria-modal="true" aria-labelledby="del-modal-title">
+    <div class="del-modal-card">
+      <h2 class="del-modal-title" id="del-modal-title">Delete permanently?</h2>
+      <p class="del-modal-text" id="del-modal-text">This action cannot be undone.</p>
+      <label class="del-modal-check">
+        <input type="checkbox" id="del-modal-checkbox">
+        <span>I understand this is permanent and cannot be reversed.</span>
+      </label>
+      <div class="del-modal-actions">
+        <button type="button" class="del-modal-cancel" id="del-modal-cancel">Cancel</button>
+        <button type="button" class="del-modal-ok" id="del-modal-ok" disabled>Delete permanently</button>
+      </div>
+    </div>
+  </div>
+`;
+
+const DEL_MODAL_CSS = `
+  .del-modal-backdrop {
+    position: fixed; inset: 0; z-index: 9999;
+    background: rgba(15,23,42,0.55);
+    display: flex; align-items: center; justify-content: center;
+    padding: 20px;
+    backdrop-filter: blur(2px);
+    animation: delFade .15s ease-out;
+  }
+  .del-modal-backdrop[hidden] { display: none; }
+  @keyframes delFade { from { opacity: 0; } to { opacity: 1; } }
+  .del-modal-card {
+    background: #fff; border-radius: 14px; padding: 22px 22px 18px;
+    max-width: 420px; width: 100%;
+    box-shadow: 0 20px 50px -16px rgba(0,0,0,0.35);
+    animation: delPop .18s cubic-bezier(.18,.7,.25,1.2);
+  }
+  @keyframes delPop {
+    from { transform: scale(0.94); opacity: 0; }
+    to   { transform: scale(1);    opacity: 1; }
+  }
+  .del-modal-title {
+    margin: 0 0 6px; font-size: 19px; font-weight: 700;
+    letter-spacing: -0.02em; color: #991b1b;
+  }
+  .del-modal-text {
+    margin: 0 0 16px; font-size: 14px; line-height: 1.5; color: #475569;
+    word-break: break-word;
+  }
+  .del-modal-check {
+    display: flex; align-items: flex-start; gap: 10px;
+    padding: 12px 14px; margin: 0 0 16px;
+    background: #fef2f2; border: 1px solid #fecaca; border-radius: 10px;
+    cursor: pointer;
+  }
+  .del-modal-check input[type="checkbox"] {
+    width: 20px; height: 20px; flex: 0 0 auto; margin: 0;
+    accent-color: #dc2626;
+  }
+  .del-modal-check span { font-size: 14px; line-height: 1.4; color: #7f1d1d; font-weight: 500; }
+  .del-modal-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+  .del-modal-actions button {
+    flex: 1 1 140px; min-height: 48px; padding: 12px 16px;
+    border: 0; border-radius: 10px; cursor: pointer;
+    font: inherit; font-size: 15px; font-weight: 600;
+    transition: filter .15s, transform .08s;
+  }
+  .del-modal-cancel { background: #fff; color: #0f172a; border: 1px solid #e5e7eb; }
+  .del-modal-cancel:hover { background: #f3f4f6; }
+  .del-modal-ok {
+    background: linear-gradient(180deg, #dc2626 0%, #b91c1c 100%); color: #fff;
+    box-shadow: 0 1px 2px rgba(220,38,38,0.22), 0 8px 22px -8px rgba(220,38,38,0.55);
+  }
+  .del-modal-ok:hover { filter: brightness(1.05); }
+  .del-modal-ok:active { transform: translateY(1px); }
+  .del-modal-ok:disabled {
+    background: #fecaca; color: #fff; box-shadow: none;
+    cursor: not-allowed; filter: none; transform: none;
+  }
+`;
+
+const DEL_MODAL_JS = `
+  (function () {
+    const modal   = document.getElementById('del-modal');
+    const titleEl = document.getElementById('del-modal-title');
+    const textEl  = document.getElementById('del-modal-text');
+    const check   = document.getElementById('del-modal-checkbox');
+    const okBtn   = document.getElementById('del-modal-ok');
+    const cancel  = document.getElementById('del-modal-cancel');
+    if (!modal) return;
+
+    let onConfirm = null;
+
+    function open(opts) {
+      titleEl.textContent = opts.title || 'Delete permanently?';
+      textEl.textContent  = opts.message || 'This action cannot be undone.';
+      okBtn.textContent   = opts.okText  || 'Delete permanently';
+      check.checked = false;
+      okBtn.disabled = true;
+      modal.hidden = false;
+      document.body.style.overflow = 'hidden';
+      onConfirm = opts.then || null;
+      // Focus Cancel by default so a stray Enter keypress dismisses
+      // rather than confirms.
+      setTimeout(() => cancel.focus(), 50);
+    }
+    function close() {
+      modal.hidden = true;
+      document.body.style.overflow = '';
+      onConfirm = null;
+    }
+
+    check.addEventListener('change', () => { okBtn.disabled = !check.checked; });
+    cancel.addEventListener('click', close);
+    okBtn.addEventListener('click', async () => {
+      if (!check.checked) return;
+      const fn = onConfirm;
+      close();
+      if (typeof fn === 'function') {
+        try { await fn(); } catch (e) { console.error('[del-modal] callback error', e); }
+      }
+    });
+    // Click outside the card = cancel
+    modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+    // Escape = cancel
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !modal.hidden) close();
+    });
+
+    window.__confirmDelete = open;
+  })();
+`;
 
 // ---------- recent list rendering (per user, used on /upload) ----------
 
@@ -2581,13 +2722,18 @@ const MSG_LIST_JS = `
         // Delete tile
         if (btn.classList.contains('tile-delete')) {
           const slug = btn.dataset.slug;
-          if (!confirm('Delete this message? This can\\'t be undone.')) return;
-          try {
-            const res = await fetch('/api/messages/' + slug + '/delete', { method: 'POST', credentials: 'same-origin' });
-            if (!res.ok) throw 0;
-            tile.remove();
-            // Update message count in the group head
-          } catch { alert('Delete failed.'); }
+          const tileTitle = (tile.querySelector('.tile-title')?.textContent || 'this message').trim();
+          window.__confirmDelete({
+            title: 'Delete this message?',
+            message: 'You\\'re about to delete "' + tileTitle + '". This action is permanent — the message and its share link will be gone forever.',
+            then: async () => {
+              try {
+                const res = await fetch('/api/messages/' + slug + '/delete', { method: 'POST', credentials: 'same-origin' });
+                if (!res.ok) throw 0;
+                tile.remove();
+              } catch { alert('Delete failed.'); }
+            }
+          });
           return;
         }
       }
@@ -2618,12 +2764,18 @@ const MSG_LIST_JS = `
         }
         if (btn.classList.contains('grp-delete-btn')) {
           const title = grpCard.querySelector('.grp-title').textContent.trim();
-          if (!confirm('Delete the group "' + title + '"?\\n\\nThe messages inside will become standalone (not deleted).')) return;
-          try {
-            const res = await fetch('/api/groups/' + grpCard.dataset.slug + '/delete', { method: 'POST', credentials: 'same-origin' });
-            if (!res.ok) throw 0;
-            location.reload();
-          } catch { alert('Delete failed.'); }
+          window.__confirmDelete({
+            title: 'Delete this group?',
+            message: 'You\\'re about to delete the group "' + title + '". The group itself is permanently removed; the messages inside will become standalone (not deleted).',
+            okText: 'Delete group',
+            then: async () => {
+              try {
+                const res = await fetch('/api/groups/' + grpCard.dataset.slug + '/delete', { method: 'POST', credentials: 'same-origin' });
+                if (!res.ok) throw 0;
+                location.reload();
+              } catch { alert('Delete failed.'); }
+            }
+          });
           return;
         }
       }
@@ -2735,17 +2887,23 @@ const MSG_LIST_JS = `
       // Delete
       if (btn.classList.contains('msg-delete-btn')) {
         const title = card.querySelector('.msg-card-title').textContent.trim();
-        if (!confirm('Delete "' + title + '"?\\n\\nThis can\\'t be undone.')) return;
-        btn.disabled = true; btn.textContent = 'Deleting…';
-        try {
-          const res = await fetch('/api/messages/' + card.dataset.slug + '/delete', {
-            method: 'POST', credentials: 'same-origin',
-          });
-          if (!res.ok) throw new Error('HTTP ' + res.status);
-          card.remove();
-        } catch { btn.disabled = false; btn.textContent = 'Delete'; alert('Delete failed.'); }
+        window.__confirmDelete({
+          title: 'Delete this message?',
+          message: 'You\\'re about to delete "' + title + '". This is permanent — the message and its share link will be gone forever.',
+          then: async () => {
+            btn.disabled = true; btn.textContent = 'Deleting…';
+            try {
+              const res = await fetch('/api/messages/' + card.dataset.slug + '/delete', {
+                method: 'POST', credentials: 'same-origin',
+              });
+              if (!res.ok) throw 0;
+              card.remove();
+            } catch { btn.disabled = false; btn.textContent = 'Delete'; alert('Delete failed.'); }
+          }
+        });
         return;
       }
+
     });
   })();
 `;
@@ -3280,11 +3438,16 @@ const RECENT_LIST_JS = `
       }
       if (btn.classList.contains('delete-btn')) {
         const title = btn.dataset.title || 'this file';
-        if (!confirm('Delete "' + title + '"?\\n\\nThe share link will stop working and the file will be removed from storage. This cannot be undone.')) return;
-        btn.disabled = true; btn.textContent = 'Deleting…';
-        const res = await fetch('/api/delete/' + btn.dataset.slug, { method: 'POST', credentials: 'same-origin' });
-        if (res.ok) btn.closest('.recent-item').remove();
-        else { btn.disabled = false; btn.textContent = 'Delete'; alert('Delete failed.'); }
+        window.__confirmDelete({
+          title: 'Delete this file?',
+          message: 'You\\'re about to delete "' + title + '". The share link will stop working and the file is removed from storage. This is permanent and cannot be reversed.',
+          then: async () => {
+            btn.disabled = true; btn.textContent = 'Deleting…';
+            const res = await fetch('/api/delete/' + btn.dataset.slug, { method: 'POST', credentials: 'same-origin' });
+            if (res.ok) btn.closest('.recent-item').remove();
+            else { btn.disabled = false; btn.textContent = 'Delete'; alert('Delete failed.'); }
+          }
+        });
         return;
       }
     });
@@ -4025,13 +4188,19 @@ app.get('/admin', requireUser, requireAdmin, (req, res) => {
 
             if (btn.classList.contains('delete-btn')) {
               const who = tr.querySelector('.user-email').textContent.trim();
-              if (!confirm('Delete account ' + who + ' and all their files?\\n\\nThis removes the user, their share links, and their files from storage. This cannot be undone.')) return;
-              btn.disabled = true;
-              try {
-                const res = await fetch('/admin/users/' + id + '/delete', { method: 'POST', credentials: 'same-origin' });
-                if (!res.ok) throw new Error('HTTP ' + res.status);
-                tr.remove();
-              } catch { alert('Delete failed.'); btn.disabled = false; }
+              window.__confirmDelete({
+                title: 'Delete this account?',
+                message: 'You\\'re about to delete the account ' + who + ' along with every share link and every file they uploaded. This is permanent and cannot be reversed.',
+                okText: 'Delete account',
+                then: async () => {
+                  btn.disabled = true;
+                  try {
+                    const res = await fetch('/admin/users/' + id + '/delete', { method: 'POST', credentials: 'same-origin' });
+                    if (!res.ok) throw new Error('HTTP ' + res.status);
+                    tr.remove();
+                  } catch { alert('Delete failed.'); btn.disabled = false; }
+                }
+              });
               return;
             }
           });
