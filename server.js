@@ -1891,6 +1891,7 @@ function renderMessageCard(m, publicOrigin) {
       <div class="msg-card-actions">
         <a class="btn btn-secondary btn-sm" href="/m/${escHtml(m.slug)}" target="_blank" rel="noopener">Open</a>
         <a class="btn btn-secondary btn-sm" href="/messages/${escHtml(m.slug)}/edit">Edit</a>
+        <button type="button" class="btn btn-secondary btn-sm move-to-group-btn" style="position: relative;">Move to group</button>
         <button type="button" class="btn btn-secondary btn-sm copy-link-btn" data-url="${escHtml(url)}">Copy link</button>
         <button type="button" class="btn btn-danger btn-sm msg-delete-btn">Delete</button>
       </div>
@@ -1970,6 +1971,13 @@ app.get('/messages', requireUser, (req, res) => {
             ).join('')}
       </div>
 
+      <script>
+        // Expose the user's groups (slug + title) so the per-card
+        // "Move to group" picker can render without an extra fetch.
+        window.__USER_GROUPS = ${JSON.stringify(
+          (groupRows || []).map(g => ({ slug: g.slug, title: g.title }))
+        )};
+      </script>
       <script>${MSG_LIST_JS}</script>
     `,
   }));
@@ -2507,10 +2515,11 @@ const MSG_LIST_JS = `
     const list = document.getElementById('msg-list');
     if (!list) return;
 
-    // Close any open tile menus when clicking elsewhere
+    // Close any open tile/move menus when clicking elsewhere
     document.addEventListener('click', (e) => {
-      if (!e.target.closest('.tile-menu') && !e.target.closest('.tile-overflow')) {
-        document.querySelectorAll('.tile-menu').forEach(m => m.remove());
+      if (!e.target.closest('.tile-menu') && !e.target.closest('.tile-overflow') &&
+          !e.target.closest('.move-menu') && !e.target.closest('.move-to-group-btn')) {
+        document.querySelectorAll('.tile-menu, .move-menu').forEach(m => m.remove());
       }
     });
 
@@ -2678,6 +2687,40 @@ const MSG_LIST_JS = `
           else              card.parentNode.insertBefore(card, sibling);
           alert('Move failed (network).');
         }
+        return;
+      }
+
+      // Move to group → popover with the user's groups
+      if (btn.classList.contains('move-to-group-btn')) {
+        document.querySelectorAll('.tile-menu, .move-menu').forEach(m => m.remove());
+        const groups = (window.__USER_GROUPS || []);
+        const menu = document.createElement('div');
+        menu.className = 'tile-menu move-menu';
+        if (groups.length === 0) {
+          menu.innerHTML = '<div style="padding:10px 12px; font-size:13px; color:var(--muted);">No groups yet.</div>' +
+                           '<a href="/groups/new">+ Create a new group</a>';
+        } else {
+          menu.innerHTML = groups.map(g =>
+            '<button type="button" class="move-pick" data-group-slug="' + g.slug.replace(/"/g,'&quot;') + '">' + g.title.replace(/</g,'&lt;') + '</button>'
+          ).join('') + '<a href="/groups/new">+ New group…</a>';
+        }
+        btn.style.position = 'relative';
+        btn.appendChild(menu);
+        return;
+      }
+      // Picked a group from the move popover
+      if (btn.classList.contains('move-pick')) {
+        const groupSlug = btn.dataset.groupSlug;
+        const cardEl = btn.closest('.msg-card');
+        if (!cardEl) return;
+        try {
+          const res = await fetch('/api/messages/' + cardEl.dataset.slug + '/move-to-group', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ groupSlug }), credentials: 'same-origin',
+          });
+          if (!res.ok) throw 0;
+          location.reload();
+        } catch { alert('Move failed.'); }
         return;
       }
 
