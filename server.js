@@ -17,7 +17,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 
-const { users: udb, files: fdb, passwordResets: prdb, magicLinks: mldb, messages: mdb } = require('./lib/db');
+const { users: udb, files: fdb, passwordResets: prdb, magicLinks: mldb, messages: mdb, groups: gdb } = require('./lib/db');
 const users = require('./lib/users');
 const ghl = require('./lib/ghl');
 const transcode = require('./lib/transcode');
@@ -1815,6 +1815,55 @@ function linkifyHtml(text) {
   return out;
 }
 
+// Group card — teal accent header, 2-column grid of orange/teal alternating
+// tiles inside. Each tile has its own compact copy button and a ⋯ menu.
+function renderGroupCard(g, children, publicOrigin) {
+  const tiles = children.map((m, i) => {
+    const isOrange = i % 2 === 0;
+    const themeClass = isOrange ? 'tile-orange' : 'tile-teal';
+    const bodyJson = JSON.stringify(m.body);
+    const preview = (m.body || '').toString().split('\n').find(s => s.trim()) || '';
+    const ellided = preview.length > 60 ? preview.slice(0, 60).trimEnd() + '…' : preview;
+    return `
+      <div class="msg-tile ${themeClass}" data-slug="${escHtml(m.slug)}">
+        <button type="button" class="tile-overflow" aria-label="More" data-slug="${escHtml(m.slug)}">⋯</button>
+        <div class="tile-title">${escHtml(m.title || '(untitled)')}</div>
+        <div class="tile-preview">${escHtml(ellided)}</div>
+        <button type="button" class="tile-copy" data-body='${escHtml(bodyJson)}'>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block; vertical-align:middle; margin-right:4px;"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>Copy
+        </button>
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <div class="grp-card" data-slug="${escHtml(g.slug)}">
+      <div class="grp-head">
+        <div class="grp-head-text">
+          <span class="grp-pill">
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+            Group
+          </span>
+          <h3 class="grp-title">${escHtml(g.title || '(untitled group)')}</h3>
+          <span class="grp-meta">${children.length} message${children.length === 1 ? '' : 's'}</span>
+        </div>
+        <div class="msg-reorder" role="group" aria-label="Reorder group">
+          <button type="button" class="msg-reorder-btn grp-up-btn"   aria-label="Move up"   title="Move group up">↑</button>
+          <button type="button" class="msg-reorder-btn grp-down-btn" aria-label="Move down" title="Move group down">↓</button>
+        </div>
+      </div>
+      <div class="grp-grid">
+        ${tiles || '<div class="grp-empty">No messages in this group yet — use ＋ Add below.</div>'}
+        <a href="/messages/new?group=${escHtml(g.slug)}" class="grp-add">＋ Add message to this group</a>
+      </div>
+      <div class="grp-foot">
+        <a href="/groups/${escHtml(g.slug)}/edit" class="btn btn-secondary btn-sm">Rename group</a>
+        <button type="button" class="btn btn-danger btn-sm grp-delete-btn">Delete group</button>
+      </div>
+    </div>
+  `;
+}
+
 function renderMessageCard(m, publicOrigin) {
   const url = `${publicOrigin}/m/${m.slug}`;
   const title = m.title || '(untitled message)';
@@ -1851,12 +1900,30 @@ function renderMessageCard(m, publicOrigin) {
 
 app.get('/messages', requireUser, (req, res) => {
   const q = (req.query.q || '').toString().trim().slice(0, 100);
-  const firstPage = mdb.listRecentByUser(req.user.id, { limit: MSG_PAGE_SIZE, q });
-  const nextCursor = firstPage.length === MSG_PAGE_SIZE
-    ? firstPage[firstPage.length - 1].id : null;
-  const hasAny = firstPage.length > 0 || q;
+
+  // Unified feed: groups + standalone messages, merged by sort_order DESC.
+  // Search filter applies to standalone messages only for now (group
+  // titles + their children matched separately if we extend later).
+  const standalone = mdb.listRecentByUser(req.user.id, { limit: 200, q });
+  const groupRows = q
+    ? [] // hide groups on search for now — clearer UX, easier to reason about
+    : gdb.listForUser(req.user.id, { limit: 200 });
+
+  // Build a unified array sorted by sort_order DESC. Each row is
+  // either { kind: 'group', ... } or { kind: 'message', ... }.
+  const feed = [
+    ...groupRows.map(g => ({ kind: 'group', sort_order: g.sort_order, group: g })),
+    ...standalone.map(m => ({ kind: 'message', sort_order: m.sort_order, msg: m })),
+  ].sort((a, b) => b.sort_order - a.sort_order);
+
+  // Pre-fetch each group's messages
+  const groupChildren = new Map();
+  for (const g of groupRows) {
+    groupChildren.set(g.id, mdb.listInGroup(g.id, req.user.id));
+  }
 
   const justSavedSlug = req.query.saved ? req.query.saved.toString().slice(0, 32) : '';
+  const justGrouped = req.query.group_saved ? 'A new group is saved.' : '';
 
   res.send(layout({
     title: 'Messages — ' + SITE_NAME,
@@ -1865,22 +1932,23 @@ app.get('/messages', requireUser, (req, res) => {
       <style>${MESSAGES_CSS}</style>
       <div class="msg-page-head">
         <h1>Messages</h1>
-        <a href="/messages/new" class="btn">+ New message</a>
+        <div class="msg-page-actions">
+          <a href="/groups/new" class="btn btn-secondary btn-sm">+ New group</a>
+          <a href="/messages/new" class="btn">+ New message</a>
+        </div>
       </div>
       <p class="muted">Save your DMs once. Tap copy, paste anywhere — Instagram, WhatsApp, Facebook, anything.</p>
 
-      ${justSavedSlug ? `
+      ${(justSavedSlug || justGrouped) ? `
         <div class="card" id="saved-banner" style="border-left: 4px solid var(--ok); background:#f0fdf4;">
-          <strong style="color:#166534;">Saved.</strong>
-          <span class="muted" style="font-size:14px;">It's at the top of your list.</span>
+          <strong style="color:#166534;">${justGrouped || 'Saved.'}</strong>
+          <span class="muted" style="font-size:14px;">${justGrouped ? '' : "It's at the top of your list."}</span>
         </div>
         <script>
-          // One-shot banner — scrub the ?saved= param so a manual
-          // refresh or navigating-back doesn't replay it. Preserve
-          // any other params (e.g. ?q=foo) the user may have had.
           try {
             const u = new URL(location.href);
             u.searchParams.delete('saved');
+            u.searchParams.delete('group_saved');
             history.replaceState(null, '', u.pathname + (u.search || ''));
           } catch (e) {}
         </script>
@@ -1892,13 +1960,15 @@ app.get('/messages', requireUser, (req, res) => {
       </form>
 
       <div id="msg-list">
-        ${firstPage.length === 0
+        ${feed.length === 0
           ? `<div class="recent-empty">${q
               ? 'No messages match that search.'
-              : 'No saved messages yet. Click <a href="/messages/new">+ New message</a> to start.'}</div>`
-          : firstPage.map(m => renderMessageCard(m, PUBLIC_ORIGIN)).join('')}
+              : 'No saved messages yet. Click <a href="/messages/new">+ New message</a> or <a href="/groups/new">+ New group</a> to start.'}</div>`
+          : feed.map(item => item.kind === 'group'
+              ? renderGroupCard(item.group, groupChildren.get(item.group.id) || [], PUBLIC_ORIGIN)
+              : renderMessageCard(item.msg, PUBLIC_ORIGIN)
+            ).join('')}
       </div>
-      ${nextCursor != null ? `<div id="msg-sentinel" data-cursor="${nextCursor}" class="muted" style="text-align: center; padding: 16px;">Loading more…</div>` : ''}
 
       <script>${MSG_LIST_JS}</script>
     `,
@@ -1906,6 +1976,14 @@ app.get('/messages', requireUser, (req, res) => {
 });
 
 app.get('/messages/new', requireUser, (req, res) => {
+  // Allow ?group=<slug> to pre-select a target group from the URL
+  // (used by the "+ Add message to this group" link inside group cards).
+  const preselectSlug = (req.query.group || '').toString().trim();
+  const allGroups = gdb.listForUser(req.user.id, { limit: 200 });
+  const groupOpts = allGroups.map(g =>
+    `<option value="${escHtml(g.slug)}"${g.slug === preselectSlug ? ' selected' : ''}>${escHtml(g.title)}</option>`
+  ).join('');
+
   res.send(layout({
     title: 'New message — ' + SITE_NAME,
     user: req.user,
@@ -1923,6 +2001,16 @@ app.get('/messages/new', requireUser, (req, res) => {
           <textarea id="body" name="body" required rows="14" placeholder="Write your message exactly as you'd paste it…"></textarea>
           <p class="muted" style="font-size:12px; margin:6px 0 0;">Line breaks, emojis, everything is preserved.</p>
         </div>
+        ${allGroups.length > 0 ? `
+          <div>
+            <label for="group">Group (optional)</label>
+            <select id="group" name="group" style="width:100%; padding:12px 14px; font-size:15px; border:1px solid var(--border); border-radius:10px; background:#fff;">
+              <option value="">(none — standalone message)</option>
+              ${groupOpts}
+            </select>
+            <p class="muted" style="font-size:12px; margin:6px 0 0;">Saving inside a group shows it as a tile in that group's matrix.</p>
+          </div>
+        ` : ''}
         <button type="submit" class="btn btn-block">Save message</button>
         <p class="err" id="formErr" style="display:none;"></p>
         <p class="muted" style="text-align:center; font-size:14px; margin:0;"><a href="/messages">← Back to messages</a></p>
@@ -1933,7 +2021,11 @@ app.get('/messages/new', requireUser, (req, res) => {
           const errEl = document.getElementById('formErr');
           errEl.style.display = 'none';
           const fd = new FormData(ev.target);
-          const body = { title: fd.get('title'), body: fd.get('body') };
+          const body = {
+            title: fd.get('title'),
+            body: fd.get('body'),
+            groupSlug: fd.get('group') || null,
+          };
           try {
             const res = await fetch('/api/messages', {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1956,6 +2048,18 @@ app.get('/messages/:slug/edit', requireUser, (req, res) => {
   if (!m) {
     return res.status(404).send(layout({ title: 'Not found', user: req.user, body: '<h1>Not found</h1><p>This message does not exist or is not yours.</p>' }));
   }
+  // Look up the user's groups + which one this message is in (if any),
+  // so the dropdown can preselect.
+  const allGroups = gdb.listForUser(req.user.id, { limit: 200 });
+  const currentGroupSlug = (() => {
+    if (!m.group_id) return '';
+    const g = allGroups.find(x => x.id === m.group_id);
+    return g ? g.slug : '';
+  })();
+  const groupOpts = allGroups.map(g =>
+    `<option value="${escHtml(g.slug)}"${g.slug === currentGroupSlug ? ' selected' : ''}>${escHtml(g.title)}</option>`
+  ).join('');
+
   res.send(layout({
     title: 'Edit message — ' + SITE_NAME,
     user: req.user,
@@ -1971,6 +2075,16 @@ app.get('/messages/:slug/edit', requireUser, (req, res) => {
           <label for="body">Message</label>
           <textarea id="body" name="body" required rows="14">${escHtml(m.body)}</textarea>
         </div>
+        ${allGroups.length > 0 ? `
+          <div>
+            <label for="group">Group</label>
+            <select id="group" name="group" style="width:100%; padding:12px 14px; font-size:15px; border:1px solid var(--border); border-radius:10px; background:#fff;">
+              <option value="">(none — standalone message)</option>
+              ${groupOpts}
+            </select>
+            <p class="muted" style="font-size:12px; margin:6px 0 0;">Move this message into a group, or back out to standalone.</p>
+          </div>
+        ` : ''}
         <button type="submit" class="btn btn-block">Save changes</button>
         <p class="err" id="formErr" style="display:none;"></p>
         <p class="muted" style="text-align:center; font-size:14px; margin:0;"><a href="/messages">← Back to messages</a></p>
@@ -1981,14 +2095,24 @@ app.get('/messages/:slug/edit', requireUser, (req, res) => {
           const errEl = document.getElementById('formErr');
           errEl.style.display = 'none';
           const fd = new FormData(ev.target);
-          const body = { title: fd.get('title'), body: fd.get('body') };
+          const payload = { title: fd.get('title'), body: fd.get('body') };
+          const newGroupSlug = (fd.get('group') || '').toString().trim();
           try {
             const res = await fetch('/api/messages/${escHtml(m.slug)}', {
               method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(body), credentials: 'same-origin',
+              body: JSON.stringify(payload), credentials: 'same-origin',
             });
             const data = await res.json().catch(() => ({}));
             if (!res.ok) throw new Error(data.error || 'Save failed');
+            // Optionally re-bucket the message
+            const currentGroupSlug = ${JSON.stringify(currentGroupSlug)};
+            if (newGroupSlug !== currentGroupSlug) {
+              await fetch('/api/messages/${escHtml(m.slug)}/move-to-group', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ groupSlug: newGroupSlug }),
+                credentials: 'same-origin',
+              });
+            }
             location.href = '/messages?saved=' + encodeURIComponent('${escHtml(m.slug)}');
           } catch (e) {
             errEl.textContent = e.message; errEl.style.display = 'block';
@@ -2003,12 +2127,18 @@ app.post('/api/messages', requireUser, express.json({ limit: '2mb' }), (req, res
   try {
     const title = ((req.body && req.body.title) || '').toString().trim();
     const body = ((req.body && req.body.body) || '').toString();
+    const groupSlug = ((req.body && req.body.groupSlug) || '').toString().trim();
     if (!title) throw new Error('Title is required.');
     if (!body.trim()) throw new Error('Message body is required.');
     if (body.length > 200000) throw new Error('Message is too long (max 200,000 characters).');
     const slug = nanoid(8);
     mdb.insert({ slug, userId: req.user.id, title, body });
-    console.log(`[msg] user=${req.user.id} created slug=${slug} (${body.length} chars)`);
+    // If a group was selected, place the new message into it.
+    if (groupSlug) {
+      const g = gdb.getBySlugForUser(groupSlug, req.user.id);
+      if (g) mdb.moveToGroup(slug, req.user.id, g.id);
+    }
+    console.log(`[msg] user=${req.user.id} created slug=${slug} (${body.length} chars)${groupSlug ? ' group=' + groupSlug : ''}`);
     res.json({ ok: true, slug });
   } catch (err) {
     res.status(400).json({ ok: false, error: err.message });
@@ -2045,6 +2175,133 @@ app.post('/api/messages/:slug/move', requireUser, express.json(), (req, res) => 
   res.json({ ok: true });
 });
 
+// Move a message into a group (or out via groupSlug = null/empty)
+app.post('/api/messages/:slug/move-to-group', requireUser, express.json(), (req, res) => {
+  const targetSlug = (req.body && req.body.groupSlug || '').toString().trim();
+  let groupId = null;
+  if (targetSlug) {
+    const g = gdb.getBySlugForUser(targetSlug, req.user.id);
+    if (!g) return res.status(404).json({ ok: false, error: 'group not found' });
+    groupId = g.id;
+  }
+  const result = mdb.moveToGroup(req.params.slug, req.user.id, groupId);
+  if (!result.ok) return res.status(400).json({ ok: false, error: result.reason });
+  res.json({ ok: true });
+});
+
+// ---------- groups ----------
+
+app.get('/groups/new', requireUser, (req, res) => {
+  res.send(layout({
+    title: 'New group — ' + SITE_NAME,
+    user: req.user,
+    body: `
+      <style>${MESSAGES_CSS}</style>
+      <h1>New group</h1>
+      <p class="muted">Group related DMs together so you can copy from one place.</p>
+      <form id="grpForm" class="card stack">
+        <div>
+          <label for="title">Group name</label>
+          <input id="title" name="title" type="text" required autofocus maxlength="200" placeholder="e.g. BD workshop outreach">
+        </div>
+        <button type="submit" class="btn btn-block">Create group</button>
+        <p class="err" id="formErr" style="display:none;"></p>
+        <p class="muted" style="text-align:center; font-size:14px; margin:0;"><a href="/messages">← Back to messages</a></p>
+      </form>
+      <script>
+        document.getElementById('grpForm').addEventListener('submit', async (ev) => {
+          ev.preventDefault();
+          const errEl = document.getElementById('formErr'); errEl.style.display = 'none';
+          const fd = new FormData(ev.target);
+          try {
+            const res = await fetch('/api/groups', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ title: fd.get('title') }), credentials: 'same-origin',
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.error || 'Save failed');
+            location.href = '/messages?group_saved=1';
+          } catch (e) { errEl.textContent = e.message; errEl.style.display = 'block'; }
+        });
+      </script>
+    `,
+  }));
+});
+
+app.get('/groups/:slug/edit', requireUser, (req, res) => {
+  const g = gdb.getBySlugForUser(req.params.slug, req.user.id);
+  if (!g) return res.status(404).send(layout({ title: 'Not found', user: req.user, body: '<h1>Not found</h1><p>This group does not exist or is not yours.</p>' }));
+  res.send(layout({
+    title: 'Rename group — ' + SITE_NAME,
+    user: req.user,
+    body: `
+      <style>${MESSAGES_CSS}</style>
+      <h1>Rename group</h1>
+      <form id="grpForm" class="card stack">
+        <div>
+          <label for="title">Group name</label>
+          <input id="title" name="title" type="text" required autofocus maxlength="200" value="${escHtml(g.title)}">
+        </div>
+        <button type="submit" class="btn btn-block">Save</button>
+        <p class="err" id="formErr" style="display:none;"></p>
+        <p class="muted" style="text-align:center; font-size:14px; margin:0;"><a href="/messages">← Back to messages</a></p>
+      </form>
+      <script>
+        document.getElementById('grpForm').addEventListener('submit', async (ev) => {
+          ev.preventDefault();
+          const errEl = document.getElementById('formErr'); errEl.style.display = 'none';
+          const fd = new FormData(ev.target);
+          try {
+            const res = await fetch('/api/groups/${escHtml(g.slug)}', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ title: fd.get('title') }), credentials: 'same-origin',
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) throw new Error(data.error || 'Save failed');
+            location.href = '/messages';
+          } catch (e) { errEl.textContent = e.message; errEl.style.display = 'block'; }
+        });
+      </script>
+    `,
+  }));
+});
+
+app.post('/api/groups', requireUser, express.json(), (req, res) => {
+  try {
+    const title = ((req.body && req.body.title) || '').toString().trim();
+    if (!title) throw new Error('Group name is required.');
+    const slug = nanoid(8);
+    gdb.insert({ slug, userId: req.user.id, title });
+    console.log(`[grp] user=${req.user.id} created slug=${slug}`);
+    res.json({ ok: true, slug });
+  } catch (err) { res.status(400).json({ ok: false, error: err.message }); }
+});
+
+app.post('/api/groups/:slug', requireUser, express.json(), (req, res) => {
+  try {
+    const g = gdb.getBySlugForUser(req.params.slug, req.user.id);
+    if (!g) return res.status(404).json({ ok: false, error: 'not found' });
+    const title = ((req.body && req.body.title) || '').toString().trim();
+    if (!title) throw new Error('Group name is required.');
+    gdb.rename(g.id, req.user.id, title);
+    res.json({ ok: true });
+  } catch (err) { res.status(400).json({ ok: false, error: err.message }); }
+});
+
+app.post('/api/groups/:slug/delete', requireUser, (req, res) => {
+  const g = gdb.getBySlugForUser(req.params.slug, req.user.id);
+  if (!g) return res.status(404).json({ ok: false, error: 'not found' });
+  gdb.deleteByIdForUser(g.id, req.user.id);
+  res.json({ ok: true });
+});
+
+app.post('/api/groups/:slug/move', requireUser, express.json(), (req, res) => {
+  const dir = (req.body && req.body.direction) === 'down' ? 'down' : 'up';
+  const result = gdb.move(req.params.slug, req.user.id, dir);
+  if (!result.ok) return res.status(400).json({ ok: false, error: result.reason });
+  res.json({ ok: true });
+});
+
 // Public message viewer — no auth, big copy CTA
 app.get('/m/:slug', (req, res) => {
   const m = mdb.getBySlug(req.params.slug);
@@ -2061,6 +2318,107 @@ const MESSAGES_CSS = `
   .msg-search { display: flex; gap: 8px; margin: 16px 0; }
   .msg-search input[type="text"] { flex: 1; padding: 12px 14px; font-size: 15px; border: 1px solid var(--border); border-radius: 10px; background: #fff; }
   .msg-search input[type="text"]:focus { outline: 0; border-color: var(--brand); box-shadow: 0 0 0 4px rgba(37,99,235,0.12); }
+
+  .msg-page-actions { display: flex; gap: 8px; align-items: center; }
+
+  /* ---------- Group card (matrix layout) ---------- */
+  .grp-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-left: 3px solid #0d9488;
+    border-radius: 12px;
+    padding: 12px;
+    margin-bottom: 12px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+  }
+  .grp-head { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 10px; }
+  .grp-head-text { flex: 1 1 auto; min-width: 0; }
+  .grp-pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 2px 8px; border-radius: 99px;
+    background: #0d9488; color: #fff;
+    font-size: 10.5px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
+    margin-bottom: 4px;
+  }
+  .grp-title { margin: 0 0 1px; font-size: 15px; font-weight: 700; color: var(--fg); line-height: 1.25; word-break: break-word; }
+  .grp-meta { font-size: 11px; color: var(--muted); }
+
+  .grp-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .msg-tile {
+    position: relative;
+    border-radius: 10px;
+    padding: 9px 10px;
+    border: 1px solid transparent;
+  }
+  .msg-tile.tile-orange { background: #fff7ed; border-color: #fed7aa; }
+  .msg-tile.tile-teal   { background: #f0fdfa; border-color: #99f6e4; }
+  .tile-overflow {
+    position: absolute; top: 4px; right: 4px;
+    width: 22px; height: 22px; padding: 0;
+    background: transparent; border: 0; cursor: pointer;
+    color: #475569; font-size: 16px; line-height: 1;
+    border-radius: 6px;
+  }
+  .tile-overflow:hover { background: rgba(0,0,0,0.05); }
+  .tile-title {
+    font-size: 12.5px; font-weight: 600; color: var(--fg);
+    line-height: 1.25; margin-bottom: 4px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    padding-right: 22px;
+  }
+  .tile-preview {
+    font-size: 11px; color: var(--muted); line-height: 1.3;
+    margin-bottom: 8px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .tile-copy {
+    width: 100%; min-height: 38px;
+    padding: 8px; border: 0; border-radius: 8px;
+    color: #fff; font-size: 13px; font-weight: 600; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+    -webkit-tap-highlight-color: rgba(255,255,255,0.2);
+    transition: transform .08s, filter .15s;
+  }
+  .msg-tile.tile-orange .tile-copy { background: #f97316; }
+  .msg-tile.tile-teal   .tile-copy { background: #0d9488; }
+  .tile-copy:hover { filter: brightness(1.05); }
+  .tile-copy:active { transform: scale(0.97); }
+  .tile-copy.is-copied { background: #16a34a !important; }
+
+  .grp-add {
+    grid-column: span 2;
+    display: flex; align-items: center; justify-content: center;
+    min-height: 36px; padding: 8px;
+    background: transparent;
+    border: 1px dashed #0d9488; color: #0d9488;
+    border-radius: 10px; font-size: 12.5px; font-weight: 600;
+    text-decoration: none; cursor: pointer;
+  }
+  .grp-add:hover { background: #f0fdfa; }
+  .grp-empty {
+    grid-column: span 2; padding: 16px; text-align: center;
+    font-size: 13px; color: var(--muted);
+  }
+
+  .grp-foot { display: flex; gap: 6px; margin-top: 10px; }
+  .grp-foot .btn-sm { flex: 1; }
+
+  /* In-tile overflow menu (popover) */
+  .tile-menu { position: absolute; top: 28px; right: 4px; z-index: 10;
+    background: #fff; border: 1px solid var(--border); border-radius: 8px;
+    box-shadow: 0 4px 14px -4px rgba(0,0,0,0.18); padding: 4px; min-width: 150px;
+  }
+  .tile-menu button, .tile-menu a {
+    display: block; width: 100%; text-align: left;
+    background: transparent; border: 0; padding: 8px 10px; border-radius: 6px;
+    font-size: 13px; color: var(--fg); cursor: pointer; text-decoration: none;
+  }
+  .tile-menu button:hover, .tile-menu a:hover { background: #f3f4f6; }
+  .tile-menu .danger { color: var(--err); }
 
   .msg-card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 14px 14px 12px; margin-bottom: 12px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
   .msg-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 6px; flex-wrap: nowrap; }
@@ -2149,9 +2507,111 @@ const MSG_LIST_JS = `
     const list = document.getElementById('msg-list');
     if (!list) return;
 
+    // Close any open tile menus when clicking elsewhere
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.tile-menu') && !e.target.closest('.tile-overflow')) {
+        document.querySelectorAll('.tile-menu').forEach(m => m.remove());
+      }
+    });
+
     list.addEventListener('click', async (e) => {
       const btn = e.target.closest('button, a');
       if (!btn) return;
+
+      // ---------- TILE actions ----------
+      const tile = btn.closest('.msg-tile');
+      if (tile) {
+        // Tile copy
+        if (btn.classList.contains('tile-copy')) {
+          try {
+            const body = JSON.parse(btn.dataset.body);
+            await navigator.clipboard.writeText(body);
+            btn.classList.add('is-copied');
+            const orig = btn.innerHTML;
+            btn.textContent = '✓ Copied';
+            setTimeout(() => { btn.classList.remove('is-copied'); btn.innerHTML = orig; }, 1500);
+            if (navigator.vibrate) { try { navigator.vibrate(12); } catch {} }
+          } catch (err) { alert('Copy failed.'); }
+          return;
+        }
+        // Tile overflow → popover with Open / Edit / Remove from group / Delete
+        if (btn.classList.contains('tile-overflow')) {
+          document.querySelectorAll('.tile-menu').forEach(m => m.remove());
+          const slug = btn.dataset.slug;
+          const menu = document.createElement('div');
+          menu.className = 'tile-menu';
+          menu.innerHTML =
+            '<a href="/m/' + slug + '" target="_blank" rel="noopener">Open</a>' +
+            '<a href="/messages/' + slug + '/edit">Edit</a>' +
+            '<button type="button" class="tile-remove-from-group" data-slug="' + slug + '">Remove from group</button>' +
+            '<button type="button" class="danger tile-delete" data-slug="' + slug + '">Delete</button>';
+          tile.appendChild(menu);
+          return;
+        }
+        // Remove tile from group → standalone
+        if (btn.classList.contains('tile-remove-from-group')) {
+          const slug = btn.dataset.slug;
+          try {
+            const res = await fetch('/api/messages/' + slug + '/move-to-group', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ groupSlug: '' }), credentials: 'same-origin',
+            });
+            if (!res.ok) throw 0;
+            location.reload();
+          } catch { alert('Move failed.'); }
+          return;
+        }
+        // Delete tile
+        if (btn.classList.contains('tile-delete')) {
+          const slug = btn.dataset.slug;
+          if (!confirm('Delete this message? This can\\'t be undone.')) return;
+          try {
+            const res = await fetch('/api/messages/' + slug + '/delete', { method: 'POST', credentials: 'same-origin' });
+            if (!res.ok) throw 0;
+            tile.remove();
+            // Update message count in the group head
+          } catch { alert('Delete failed.'); }
+          return;
+        }
+      }
+
+      // ---------- GROUP-card actions (reorder + delete group) ----------
+      const grpCard = btn.closest('.grp-card');
+      if (grpCard) {
+        if (btn.classList.contains('grp-up-btn') || btn.classList.contains('grp-down-btn')) {
+          const dir = btn.classList.contains('grp-up-btn') ? 'up' : 'down';
+          const sibling = dir === 'up' ? grpCard.previousElementSibling : grpCard.nextElementSibling;
+          if (sibling && (sibling.classList.contains('grp-card') || sibling.classList.contains('msg-card'))) {
+            if (dir === 'up') grpCard.parentNode.insertBefore(grpCard, sibling);
+            else              grpCard.parentNode.insertBefore(sibling, grpCard);
+          }
+          try {
+            const res = await fetch('/api/groups/' + grpCard.dataset.slug + '/move', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ direction: dir }), credentials: 'same-origin',
+            });
+            if (!res.ok) {
+              if (sibling) {
+                if (dir === 'up') grpCard.parentNode.insertBefore(sibling, grpCard);
+                else              grpCard.parentNode.insertBefore(grpCard, sibling);
+              }
+            }
+          } catch {}
+          return;
+        }
+        if (btn.classList.contains('grp-delete-btn')) {
+          const title = grpCard.querySelector('.grp-title').textContent.trim();
+          if (!confirm('Delete the group "' + title + '"?\\n\\nThe messages inside will become standalone (not deleted).')) return;
+          try {
+            const res = await fetch('/api/groups/' + grpCard.dataset.slug + '/delete', { method: 'POST', credentials: 'same-origin' });
+            if (!res.ok) throw 0;
+            location.reload();
+          } catch { alert('Delete failed.'); }
+          return;
+        }
+      }
+
+      // ---------- standalone-message-CARD actions (existing behavior) ----------
       const card = btn.closest('.msg-card');
 
       // Big primary copy
