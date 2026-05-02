@@ -17,7 +17,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 
-const { users: udb, files: fdb, passwordResets: prdb, magicLinks: mldb, messages: mdb, groups: gdb } = require('./lib/db');
+const { users: udb, files: fdb, passwordResets: prdb, magicLinks: mldb, messages: mdb, groups: gdb, feed: feeddb } = require('./lib/db');
 const users = require('./lib/users');
 const ghl = require('./lib/ghl');
 const transcode = require('./lib/transcode');
@@ -2178,7 +2178,10 @@ app.post('/api/messages/:slug/delete', requireUser, (req, res) => {
 
 app.post('/api/messages/:slug/move', requireUser, express.json(), (req, res) => {
   const dir = (req.body && req.body.direction) === 'down' ? 'down' : 'up';
-  const result = mdb.move(req.params.slug, req.user.id, dir);
+  // Use the unified feed-move helper so a standalone message can swap
+  // positions with an adjacent group (different table) — reordering
+  // works seamlessly across the mixed feed.
+  const result = feeddb.move({ kind: 'message', slug: req.params.slug, userId: req.user.id, direction: dir });
   if (!result.ok) return res.status(400).json({ ok: false, error: result.reason });
   res.json({ ok: true });
 });
@@ -2305,7 +2308,7 @@ app.post('/api/groups/:slug/delete', requireUser, (req, res) => {
 
 app.post('/api/groups/:slug/move', requireUser, express.json(), (req, res) => {
   const dir = (req.body && req.body.direction) === 'down' ? 'down' : 'up';
-  const result = gdb.move(req.params.slug, req.user.id, dir);
+  const result = feeddb.move({ kind: 'group', slug: req.params.slug, userId: req.user.id, direction: dir });
   if (!result.ok) return res.status(400).json({ ok: false, error: result.reason });
   res.json({ ok: true });
 });
