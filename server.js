@@ -1819,7 +1819,12 @@ function linkifyHtml(text) {
 // tiles inside. Each tile has its own compact copy button and a ⋯ menu.
 function renderGroupCard(g, children, publicOrigin) {
   const tiles = children.map((m, i) => {
-    const isOrange = i % 2 === 0;
+    // Checkerboard pattern: alternate by (col + row), not just by i.
+    // i % 2 alone paints whole columns one color; we want adjacent
+    // tiles in the same row OR same column to differ, like a chessboard.
+    const col = i % 2;
+    const row = Math.floor(i / 2);
+    const isOrange = (col + row) % 2 === 0;
     const themeClass = isOrange ? 'tile-orange' : 'tile-teal';
     const bodyJson = JSON.stringify(m.body);
     const preview = (m.body || '').toString().split('\n').find(s => s.trim()) || '';
