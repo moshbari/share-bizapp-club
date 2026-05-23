@@ -1972,6 +1972,7 @@ function renderGroupCard(g, children, publicOrigin) {
     const ellided = preview.length > 60 ? preview.slice(0, 60).trimEnd() + '…' : preview;
     return `
       <div class="msg-tile ${themeClass}" data-slug="${escHtml(m.slug)}">
+        <button type="button" class="tile-drag-handle" aria-label="Drag to reorder" title="Drag to reorder">≡</button>
         <button type="button" class="tile-overflow" aria-label="More" data-slug="${escHtml(m.slug)}">⋯</button>
         <div class="tile-title">${escHtml(m.title || '(untitled)')}</div>
         <div class="tile-preview">${escHtml(ellided)}</div>
@@ -2123,6 +2124,62 @@ app.get('/messages', requireUser, (req, res) => {
         window.__USER_GROUPS = ${JSON.stringify(
           (groupRows || []).map(g => ({ slug: g.slug, title: g.title }))
         )};
+      </script>
+      <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js" defer></script>
+      <script defer>
+        // Wait for SortableJS to be available, then bind to every
+        // group grid on the page.
+        function initTileDragAndDrop() {
+          if (typeof Sortable === 'undefined') {
+            // Library hasn't finished loading yet — try again very soon
+            return setTimeout(initTileDragAndDrop, 50);
+          }
+          document.querySelectorAll('.grp-grid').forEach(function (grid) {
+            if (grid.__sortableBound) return;
+            grid.__sortableBound = true;
+            Sortable.create(grid, {
+              animation: 160,
+              handle: '.tile-drag-handle',
+              draggable: '.msg-tile',
+              filter: '.grp-add, .grp-empty',
+              ghostClass: 'sortable-ghost',
+              chosenClass: 'sortable-chosen',
+              // delay+touchStartThreshold tuned for finger drag on iOS
+              delay: 0,
+              touchStartThreshold: 5,
+              onEnd: async function (evt) {
+                if (evt.oldIndex === evt.newIndex) return;
+                var card = grid.closest('.grp-card');
+                if (!card) return;
+                var groupSlug = card.dataset.slug;
+                var slugs = Array.prototype.map.call(
+                  grid.querySelectorAll('.msg-tile'),
+                  function (t) { return t.dataset.slug; }
+                ).filter(function (s) { return !!s; });
+                try {
+                  var res = await fetch(
+                    '/api/groups/' + encodeURIComponent(groupSlug) + '/reorder-tiles',
+                    {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ slugs: slugs }),
+                      credentials: 'same-origin',
+                    }
+                  );
+                  if (!res.ok) throw new Error('Save failed');
+                } catch (err) {
+                  alert('Could not save the new order — please reload and try again.');
+                  console.error('[reorder-tiles]', err);
+                }
+              },
+            });
+          });
+        }
+        if (document.readyState === 'loading') {
+          document.addEventListener('DOMContentLoaded', initTileDragAndDrop);
+        } else {
+          initTileDragAndDrop();
+        }
       </script>
       <script>${MSG_LIST_JS}</script>
     `,
@@ -2459,6 +2516,22 @@ app.post('/api/groups/:slug/move', requireUser, express.json(), (req, res) => {
   res.json({ ok: true });
 });
 
+// Reorder the message tiles inside one group. Body: { slugs: ["a","b",...] }
+// in the desired top-to-bottom order. Rewrites group_position so the
+// next page load preserves the new order. Tiles are scoped to the
+// caller (req.user.id) and the named group; foreign slugs are ignored.
+app.post('/api/groups/:slug/reorder-tiles', requireUser, express.json({ limit: '200kb' }), (req, res) => {
+  const g = gdb.getBySlugForUser(req.params.slug, req.user.id);
+  if (!g) return res.status(404).json({ ok: false, error: 'group not found' });
+  const slugs = Array.isArray(req.body && req.body.slugs) ? req.body.slugs : null;
+  if (!slugs) return res.status(400).json({ ok: false, error: 'slugs array required' });
+  // Defensive cap so a malformed client can't blow up the DB
+  if (slugs.length > 500) return res.status(400).json({ ok: false, error: 'too many slugs' });
+  const safe = slugs.map(s => (s == null ? '' : String(s))).filter(s => s.length > 0 && s.length <= 64);
+  const result = mdb.reorderTilesInGroup({ groupId: g.id, userId: req.user.id, slugs: safe });
+  res.json({ ok: true, updated: result.updated });
+});
+
 // Public message viewer — no auth, big copy CTA
 app.get('/m/:slug', (req, res) => {
   const m = mdb.getBySlug(req.params.slug);
@@ -2521,10 +2594,31 @@ const MESSAGES_CSS = `
     border-radius: 6px;
   }
   .tile-overflow:hover { background: rgba(0,0,0,0.05); }
+  /* Drag handle in the top-LEFT corner. Mirrors .tile-overflow but
+     uses the ≡ glyph and a grab cursor. touch-action: none lets
+     SortableJS take over the touch sequence on mobile without the
+     browser stealing it for scrolling. */
+  .tile-drag-handle {
+    position: absolute; top: 4px; left: 4px;
+    width: 22px; height: 22px; padding: 0;
+    background: transparent; border: 0;
+    color: #475569; font-size: 16px; line-height: 1;
+    border-radius: 6px;
+    cursor: grab;
+    touch-action: none;
+    -webkit-user-select: none; user-select: none;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .tile-drag-handle:hover { background: rgba(0,0,0,0.05); color: #0f172a; }
+  .tile-drag-handle:active { cursor: grabbing; }
+  /* While a tile is being dragged */
+  .msg-tile.sortable-chosen { box-shadow: 0 6px 18px rgba(15,23,42,0.18); }
+  .msg-tile.sortable-ghost  { opacity: 0.35; }
   .tile-title {
     font-size: 12.5px; font-weight: 600; color: var(--fg);
     line-height: 1.25; margin-bottom: 4px;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    padding-left: 22px;
     padding-right: 22px;
   }
   .tile-preview {
