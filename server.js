@@ -17,13 +17,15 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 
-const { users: udb, files: fdb, passwordResets: prdb, magicLinks: mldb, messages: mdb, groups: gdb, feed: feeddb } = require('./lib/db');
+const { users: udb, files: fdb, passwordResets: prdb, magicLinks: mldb, messages: mdb, groups: gdb, feed: feeddb, apiTokens: atdb, deviceTokens: dtdb } = require('./lib/db');
 const users = require('./lib/users');
 const ghl = require('./lib/ghl');
 const transcode = require('./lib/transcode');
 const email = require('./lib/email');
 const { classify, SIZE_CAPS, fmtBytes } = require('./lib/classify');
 const viewers = require('./lib/viewers');
+const apns = require('./lib/apns');
+const apiV1 = require('./lib/api_v1');
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -3877,6 +3879,23 @@ app.get('/magic/:token', async (req, res) => {
     res.clearCookie('gid');
     console.log(`[magic] user=${u.id} status=${u.status} email=${row.email} pending=${pending.length} claimed=${claimed} rejected=${toReject.length}`);
 
+    // Push "files are ready" to any iOS devices the user already registered.
+    if (apns.configured && claimed > 0) {
+      process.nextTick(async () => {
+        try {
+          const toks = dtdb.listByUser(u.id);
+          if (!toks.length) return;
+          await apns.fanOut(toks, {
+            title: '✅ Files ready',
+            body: claimed === 1 ? '1 file is now in your account' : `${claimed} files are now in your account`,
+            data: { kind: 'magic_link_claimed', count: claimed },
+          });
+        } catch (e) {
+          console.warn('[apns] magic-claimed push failed:', e.message);
+        }
+      });
+    }
+
     return res.redirect(`/upload?claimed=${claimed}&rejected=${toReject.length}`);
   } catch (err) {
     console.error('[magic] error:', err);
@@ -3901,6 +3920,35 @@ async function sweepExpiredPending() {
 
 // ---------- raw / download proxies (public) ----------
 
+// In-memory "we've already pushed for this slug" set so the owner only
+// gets one share_link_first_view notification per file per server-life.
+// Survives misses on container restart by design — cheap and correct
+// enough for a best-effort push.
+const firstViewPushed = new Set();
+
+function pushOnFirstView(rec, req) {
+  if (!apns.configured) return;
+  if (!rec || !rec.user_id) return;
+  if (firstViewPushed.has(rec.slug)) return;
+  // Skip if owner is viewing their own file (best-effort: compare via cookie)
+  const viewerUid = parseInt(req.signedCookies.uid, 10);
+  if (Number.isFinite(viewerUid) && viewerUid === rec.user_id) return;
+  firstViewPushed.add(rec.slug);
+  process.nextTick(async () => {
+    try {
+      const toks = dtdb.listByUser(rec.user_id);
+      if (!toks.length) return;
+      await apns.fanOut(toks, {
+        title: '📥 Your file was opened',
+        body: rec.title || rec.original_filename || 'a shared file',
+        data: { slug: rec.slug, kind: 'file_first_view' },
+      });
+    } catch (e) {
+      console.warn('[apns] first-view push failed:', e.message);
+    }
+  });
+}
+
 app.get('/raw/:slug', async (req, res) => {
   const rec = fdb.getBySlug(req.params.slug);
   if (!rec) return res.status(404).send('Not found');
@@ -3908,6 +3956,7 @@ app.get('/raw/:slug', async (req, res) => {
   // isn't live yet. Treat it the same as not-found so we don't confirm
   // existence to someone guessing slugs.
   if (!rec.activated) return res.status(404).send('Not found');
+  pushOnFirstView(rec, req);
   try {
     // Forward the Range header so HTML5 <video> / <audio> can seek and
     // progressively load. Without this, the browser gets a flat 200 with
@@ -4365,7 +4414,25 @@ app.post('/admin/users/:id/delete', requireUser, requireAdmin, (req, res) => {
 
 // ---------- healthz ----------
 
-app.get('/healthz', (req, res) => res.json({ ok: true, site: SITE_NAME }));
+app.get('/healthz', (req, res) => res.json({ ok: true, site: SITE_NAME, api_v1: true, apns: apns.configured }));
+
+// Mount ShareZPresso iOS JSON namespace. All routes added under /api/v1/*
+// in a separate file so the diff against server.js stays tiny. The web UI
+// and existing /api/* routes are untouched.
+apiV1.attach(app, {
+  db: { users: udb, files: fdb, passwordResets: prdb, magicLinks: mldb, messages: mdb, groups: gdb, feed: feeddb, apiTokens: atdb, deviceTokens: dtdb },
+  users,
+  ghl,
+  transcode,
+  email,
+  classify: { classify, fmtBytes },
+  apns,
+  upload,
+  PUBLIC_ORIGIN,
+  baseFilename,
+  sanitizeForFilename,
+  kindEmoji,
+});
 
 // Admin-only DB peek for debugging the progressive-signup flow.
 // Returns the current state of pending (activated=0) files and the
