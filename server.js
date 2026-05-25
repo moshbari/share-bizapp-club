@@ -4416,6 +4416,89 @@ app.post('/admin/users/:id/delete', requireUser, requireAdmin, (req, res) => {
 
 app.get('/healthz', (req, res) => res.json({ ok: true, site: SITE_NAME, api_v1: true, apns: apns.configured }));
 
+// ---------- Privacy + support pages (App Store required URLs) ----------
+
+const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || 'engrmoshbari@gmail.com';
+const SITE_LAUNCH_DATE = '2026';
+
+function legalPageWrapper(title, body) {
+  return `<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>${escHtml(title)} — ${escHtml(SITE_NAME)}</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+         color: #0f172a; max-width: 720px; margin: 40px auto; padding: 0 20px;
+         line-height: 1.55; }
+  h1 { font-size: 28px; margin: 0 0 8px; }
+  h2 { font-size: 20px; margin: 28px 0 8px; }
+  p, li { color: #334155; }
+  a { color: #2661ea; }
+  hr { border: 0; border-top: 1px solid #e2e8f0; margin: 28px 0; }
+  .muted { color: #64748b; font-size: 14px; }
+</style>
+</head><body>
+<p class="muted"><a href="/">← ${escHtml(SITE_NAME)}</a></p>
+<h1>${escHtml(title)}</h1>
+${body}
+<hr>
+<p class="muted">Last updated: ${SITE_LAUNCH_DATE}. Questions: <a href="mailto:${escHtml(SUPPORT_EMAIL)}">${escHtml(SUPPORT_EMAIL)}</a>.</p>
+</body></html>`;
+}
+
+app.get('/privacy', (req, res) => {
+  res.set('Content-Type', 'text/html; charset=utf-8');
+  res.send(legalPageWrapper('Privacy Policy', `
+    <p>ShareZPresso (the "Service") lets you upload files and share them via short links, and lets you save text snippets that you can tap-to-copy on the go. This Privacy Policy explains what data we collect and why.</p>
+    <h2>What we collect</h2>
+    <ul>
+      <li><strong>Account info</strong> — email and name when you sign up. Email is used to identify you and to send password-reset links.</li>
+      <li><strong>Files you upload</strong> — stored on our content delivery partner (GoHighLevel Media) so they can be served at the share link. We never share the contents of your files with anyone except people who have your share link.</li>
+      <li><strong>Saved text snippets</strong> — stored in our database under your account. We never read or share them.</li>
+      <li><strong>Device identifier for push notifications</strong> — when you opt in to push, the iOS app sends us a per-device identifier (Apple's APNs token) so our servers can notify you when your share link is first opened. Push tokens are deleted on logout.</li>
+      <li><strong>Standard server logs</strong> — IP address, request path, and timestamp for the most recent ~24 hours, used to detect abuse and debug crashes.</li>
+    </ul>
+    <h2>What we do NOT collect</h2>
+    <ul>
+      <li>No analytics SDKs (Google Analytics, Mixpanel, etc.).</li>
+      <li>No advertising identifiers (IDFA, IDFV).</li>
+      <li>No location data.</li>
+      <li>No contacts, calendar, or other personal data from your device.</li>
+      <li>No microphone, camera, or photo data unless you explicitly share a file via the app's upload buttons.</li>
+    </ul>
+    <h2>Who can see your files</h2>
+    <p>Anyone with the share link can open the file. Share links are randomly generated (8 characters) and not guessable. You can disable downloads on a per-file basis, and you can delete any file at any time from the app — deletion removes it from our database and from our content delivery partner.</p>
+    <h2>Account deletion</h2>
+    <p>You can delete your account in the app: Account tab → Log out (and then ask the administrator to delete the account), or write to the support email below. Deletion is irreversible and removes all your files, share links, saved snippets, and device push tokens.</p>
+    <h2>Children</h2>
+    <p>ShareZPresso is not directed at children under 13.</p>
+    <h2>Contact</h2>
+    <p>For privacy questions, email <a href="mailto:${escHtml(SUPPORT_EMAIL)}">${escHtml(SUPPORT_EMAIL)}</a>.</p>
+  `));
+});
+
+app.get('/support', (req, res) => {
+  res.set('Content-Type', 'text/html; charset=utf-8');
+  res.send(legalPageWrapper('Support', `
+    <p>ShareZPresso is a small tool to upload a file and share a link, plus a place to keep text snippets that you can tap-to-copy and paste into chats or emails.</p>
+    <h2>Common questions</h2>
+    <h3>How do I share a file?</h3>
+    <p>Open the app, tap the big "Pick a file to share" button, choose Camera / Photo Library / Files, set an optional title, and tap Upload. You get a share link you can copy and send anywhere.</p>
+    <h3>Why is my share link returning 404?</h3>
+    <p>The file owner may have deleted the file, or the link is misspelled. Ask them for a fresh one.</p>
+    <h3>How do push notifications work?</h3>
+    <p>You'll get a push the first time someone (other than you) opens one of your share links. You can turn this off in iOS Settings → Notifications → ShareZPresso.</p>
+    <h3>I forgot my password</h3>
+    <p>On the Login screen, tap "Forgot password?" — we send a reset link to your email that's valid for 24 hours.</p>
+    <h3>Can I use this on the web instead of the app?</h3>
+    <p>Yes. The same account works on <a href="/">share.bizapp.club</a> in any browser.</p>
+    <h2>Still stuck?</h2>
+    <p>Email <a href="mailto:${escHtml(SUPPORT_EMAIL)}">${escHtml(SUPPORT_EMAIL)}</a>. Replies usually come within one business day.</p>
+  `));
+});
+
 // Mount ShareZPresso iOS JSON namespace. All routes added under /api/v1/*
 // in a separate file so the diff against server.js stays tiny. The web UI
 // and existing /api/* routes are untouched.
