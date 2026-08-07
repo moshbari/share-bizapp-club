@@ -179,9 +179,15 @@ function kindEmoji(kind) {
   return ({ image: '🖼', video: '🎬', audio: '🎙', pdf: '📄', text: '📝', unknown: '📎' })[kind] || '📎';
 }
 
+// `status` is a workspace-organization tag the admin sets — it is NOT a paid
+// tier and nothing in the app or on this site can be bought. App Review
+// (guideline 2.1(b)) read the old "trial / upgrade" wording as a paid plan and
+// rejected the iOS build over it, so the internal value stays `trial` while
+// every user-facing surface says "Starter". Keep it that way.
 function statusPill(status) {
   const color = { trial: '#f59e0b', regular: '#16a34a', deactivated: '#dc2626' }[status] || '#64748b';
-  return `<span class="pill" style="background:${color}1a;color:${color};border:1px solid ${color}55;">${escHtml(status)}</span>`;
+  const label = { trial: 'starter', regular: 'regular', deactivated: 'deactivated' }[status] || status;
+  return `<span class="pill" style="background:${color}1a;color:${color};border:1px solid ${color}55;">${escHtml(label)}</span>`;
 }
 
 // ---------- CSS (shared across all pages) ----------
@@ -1508,7 +1514,7 @@ function renderAuthPage({ activeTab, loginErr, signupErr }) {
 
         <section id="panel-signup" class="auth-panel${activeTab === 'signup' ? '' : ' is-hidden'}" role="tabpanel" aria-labelledby="tab-signup">
           <h2 class="auth-panel-title">Start sharing — free</h2>
-          <p class="auth-panel-sub">No credit card. 5 uploads to try everything. Upgrade only when you're ready.</p>
+          <p class="auth-panel-sub">Free to use. Create an account and start sharing links right away.</p>
           <form method="POST" action="/signup" class="auth-form" novalidate>
             <div class="auth-field">
               <label for="signup-name">Your name</label>
@@ -1823,8 +1829,8 @@ app.get('/account', requireUser, (req, res) => {
     <h2>Your GHL storage</h2>
     <div class="card">
       <p class="muted" style="margin: 0;">
-        Trial accounts use the shared storage. Ask the admin to upgrade your account to <strong>regular</strong>
-        and you'll be able to connect your own GoHighLevel sub-account and folder here.
+        Starter accounts use the shared storage. Once the workspace admin sets your account to
+        <strong>Regular</strong>, you'll be able to connect your own GoHighLevel sub-account and folder here.
       </p>
     </div>
   `;
@@ -1887,7 +1893,7 @@ app.post('/account/change-password', requireUser, express.urlencoded({ extended:
 // via the folders-list endpoint. If any check fails, nothing is saved.
 app.post('/account/ghl-settings', requireUser, express.urlencoded({ extended: false }), (req, res) => {
   if (!(req.user.status === 'regular' || req.user.is_admin)) {
-    return res.redirect('/account?ghl_err=' + encodeURIComponent('Upgrade to a regular account to customize storage.'));
+    return res.redirect('/account?ghl_err=' + encodeURIComponent('Your account needs to be set to Regular to customize storage. Ask the workspace admin.'));
   }
   try {
     const row = udb.getById(req.user.id);
@@ -3053,16 +3059,16 @@ app.get('/upload', requireUser, (req, res) => {
       <div class="card" style="border-left:4px solid #f59e0b; background:#fffbeb;">
         <h2 style="margin:0 0 4px; color:#92400e; font-size:18px;">Welcome — ${claimed} file${claimed === 1 ? '' : 's'} activated.</h2>
         <p class="muted" style="margin:0; font-size:14px;">
-          ${rejected} upload${rejected === 1 ? ' was' : 's were'} not activated because your trial allows one file of each kind. Ask the admin to upgrade your account for unlimited uploads.
+          ${rejected} upload${rejected === 1 ? ' was' : 's were'} not activated because a Starter account holds one file of each kind. Ask the workspace admin to set your account to Regular.
         </p>
       </div>
     `;
   } else if (claimed === 0 && rejected > 0) {
     claimedBanner = `
       <div class="card" style="border-left:4px solid var(--err); background:#fef2f2;">
-        <h2 style="margin:0 0 4px; color:#991b1b; font-size:18px;">Upload not activated — trial limit reached.</h2>
+        <h2 style="margin:0 0 4px; color:#991b1b; font-size:18px;">Upload not activated — Starter account is full.</h2>
         <p class="muted" style="margin:0; font-size:14px;">
-          Your trial allows one file of each kind, and you've already used that slot. Ask the admin to upgrade your account to regular to unlock unlimited uploads.
+          A Starter account holds one file of each kind, and that slot is already used. Ask the workspace admin to set your account to Regular.
         </p>
       </div>
     `;
@@ -3113,7 +3119,7 @@ app.get('/upload', requireUser, (req, res) => {
 
   const trialBanner = isTrial ? `
     <div class="card" style="border-left: 4px solid #f59e0b;">
-      <strong>Trial account</strong> — one file per kind until the admin upgrades you.
+      <strong>Starter account</strong> — one file of each kind. The workspace admin can set your account to Regular for more.
       <div style="margin-top: 8px;">${renderTrialChips(usage)}</div>
     </div>
   ` : '';
@@ -3226,7 +3232,7 @@ app.get('/upload', requireUser, (req, res) => {
           }
           // Trial-user-kind check, mirrored from the server
           if (TRIAL_USED && TRIAL_USED[c.kind]) {
-            errMsg.textContent = 'Your trial allows one ' + c.kind + ' file. Ask the admin to upgrade your account to upload more.';
+            errMsg.textContent = 'A Starter account holds one ' + c.kind + ' file. Ask the workspace admin to set your account to Regular.';
             errMsg.style.display = 'block';
             return;
           }
@@ -4865,7 +4871,7 @@ function chatGate(user) {
   if (user.status === 'trial' && cdb.countReadyByUser(user.id) >= CHAT_TRIAL_MAX_CHATS) {
     return {
       ok: false,
-      reason: `Your trial allows ${CHAT_TRIAL_MAX_CHATS} chat scroll. Ask the admin to upgrade your account for unlimited scrolls.`,
+      reason: `A Starter account holds ${CHAT_TRIAL_MAX_CHATS} chat scroll. Ask the workspace admin to set your account to Regular for more.`,
     };
   }
   return { ok: true };
@@ -4936,7 +4942,7 @@ app.get('/chats', requireUser, (req, res) => {
       <p class="muted">A long conversation takes several screenshots. Put them in order once and share a single link that reads top to bottom, exactly like scrolling the real chat.</p>
       ${gate.ok
         ? `<a class="btn btn-block" href="/chats/new">➕ New chat scroll</a>`
-        : `<div class="card" style="border-left:4px solid #f59e0b;"><strong>Trial limit reached</strong><p class="muted" style="margin:6px 0 0; font-size:14px;">${escHtml(gate.reason)}</p></div>`}
+        : `<div class="card" style="border-left:4px solid #f59e0b;"><strong>Starter account is full</strong><p class="muted" style="margin:6px 0 0; font-size:14px;">${escHtml(gate.reason)}</p></div>`}
       ${rows.length ? cards : `<div class="recent-empty">No chat scrolls yet. Create one and the link will show up here.</div>`}
       <script>
         document.addEventListener('click', async function (e) {
@@ -4963,7 +4969,7 @@ app.get('/chats/new', requireUser, (req, res) => {
     return res.send(layout({
       title: 'Chat scrolls — ' + SITE_NAME,
       user: req.user,
-      body: `<h1>Trial limit reached</h1><p>${escHtml(gate.reason)}</p><a class="btn btn-block" href="/chats">Back to chat scrolls</a>`,
+      body: `<h1>Starter account is full</h1><p>${escHtml(gate.reason)}</p><a class="btn btn-block" href="/chats">Back to chat scrolls</a>`,
     }));
   }
 
@@ -5749,7 +5755,7 @@ app.get('/support', (req, res) => {
 // in a separate file so the diff against server.js stays tiny. The web UI
 // and existing /api/* routes are untouched.
 apiV1.attach(app, {
-  db: { users: udb, files: fdb, passwordResets: prdb, magicLinks: mldb, messages: mdb, groups: gdb, feed: feeddb, apiTokens: atdb, deviceTokens: dtdb },
+  db: { users: udb, files: fdb, passwordResets: prdb, magicLinks: mldb, messages: mdb, groups: gdb, feed: feeddb, chats: cdb, apiTokens: atdb, deviceTokens: dtdb },
   users,
   ghl,
   transcode,
@@ -5761,6 +5767,9 @@ apiV1.attach(app, {
   baseFilename,
   sanitizeForFilename,
   kindEmoji,
+  // Chat-scroll gating lives in server.js so the web pages and the iOS API
+  // enforce exactly the same limits from one definition.
+  chatHelpers: { gate: chatGate, itemCap: chatItemCap, purge: purgeChatImages },
 });
 
 // Admin-only DB peek for debugging the progressive-signup flow.
