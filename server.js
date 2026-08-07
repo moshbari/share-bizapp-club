@@ -17,7 +17,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 
-const { users: udb, files: fdb, passwordResets: prdb, magicLinks: mldb, messages: mdb, groups: gdb, feed: feeddb, apiTokens: atdb, deviceTokens: dtdb } = require('./lib/db');
+const { users: udb, files: fdb, passwordResets: prdb, magicLinks: mldb, messages: mdb, groups: gdb, feed: feeddb, chats: cdb, apiTokens: atdb, deviceTokens: dtdb } = require('./lib/db');
 const users = require('./lib/users');
 const ghl = require('./lib/ghl');
 const transcode = require('./lib/transcode');
@@ -45,6 +45,14 @@ app.use('/pdfjs', express.static(path.join(__dirname, 'public', 'pdfjs'), {
   setHeaders(res, filePath) {
     if (filePath.endsWith('.mjs')) res.setHeader('Content-Type', 'text/javascript');
   },
+}));
+
+// Third-party JS we serve ourselves rather than from a CDN. A blocked or slow
+// cdn.jsdelivr.net used to stall the whole page — a deferred <script> that
+// never resolves holds DOMContentLoaded hostage — and the chat editor is the
+// one screen people open on hotel wifi with a phone full of screenshots.
+app.use('/vendor', express.static(path.join(__dirname, 'public', 'vendor'), {
+  maxAge: '30d',
 }));
 
 // Cheap request logger
@@ -324,6 +332,7 @@ function renderNav(user) {
     <div class="navlinks">
       <span class="who">${escHtml(user.name || user.email)}</span>
       <a href="/upload">Upload</a>
+      <a href="/chats">Chats</a>
       <a href="/messages">Messages</a>
       <a href="/account">Account</a>
       ${adminLink}
@@ -332,7 +341,7 @@ function renderNav(user) {
   `;
 }
 
-function layout({ title, body, user, ogTitle, ogDescription, ogImageUrl, noindex = true, wide = false }) {
+function layout({ title, body, user, ogTitle, ogDescription, ogImageUrl, noindex = true, wide = false, mainClass = '' }) {
   const og = [
     `<meta property="og:site_name" content="${escHtml(SITE_NAME)}">`,
     `<meta property="og:title" content="${escHtml(ogTitle || title)}">`,
@@ -351,7 +360,7 @@ function layout({ title, body, user, ogTitle, ogDescription, ogImageUrl, noindex
   <title>${escHtml(title)}</title>
   ${noindex ? '<meta name="robots" content="noindex,nofollow">' : ''}
   ${og}
-  <style>${BASE_CSS}${DEL_MODAL_CSS}</style>
+  <style>${BASE_CSS}${DEL_MODAL_CSS}${CHAT_CSS}</style>
 </head>
 <body>
   <header class="site-header">
@@ -361,7 +370,7 @@ function layout({ title, body, user, ogTitle, ogDescription, ogImageUrl, noindex
     </a>
     ${renderNav(user)}
   </header>
-  <main${wide ? ' class="wide"' : ''}>
+  <main${[wide ? 'wide' : '', mainClass].filter(Boolean).length ? ` class="${[wide ? 'wide' : '', mainClass].filter(Boolean).join(' ')}"` : ''}>
     ${body}
   </main>
   ${DEL_MODAL_HTML}
@@ -2127,7 +2136,7 @@ app.get('/messages', requireUser, (req, res) => {
           (groupRows || []).map(g => ({ slug: g.slug, title: g.title }))
         )};
       </script>
-      <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.2/Sortable.min.js" defer></script>
+      <script src="/vendor/sortable.min.js" defer></script>
       <script defer>
         // Wait for SortableJS to be available, then bind to every
         // group grid on the page.
@@ -4098,6 +4107,1239 @@ app.get('/f/:slug', async (req, res) => {
   res.send(layout({ title: ogTitle + ' — ' + SITE_NAME, user: req.user, body, ogTitle, ogDescription, ogImageUrl, noindex: true }));
 });
 
+// ============================================================================
+// CHATS — an ordered run of screenshots shared as one scrolling page.
+//
+// The job: a long chat won't fit in one screenshot, so people take five or
+// ten. Uploading them as five separate links is useless — the reader has to
+// open each one and guess the order. A chat scroll stacks them edge-to-edge
+// at /c/<slug> so scrolling the page IS scrolling the conversation.
+//
+// Ordering is decided in the browser BEFORE anything uploads (thumbnails are
+// local blobs, so reordering is instant and costs no round-trips), and can be
+// changed afterwards on the edit page. Both use the same drag-handle +
+// serial-number list so the two screens feel like one thing.
+// ============================================================================
+
+const CHAT_MAX_ITEMS = 60;
+const CHAT_TRIAL_MAX_ITEMS = 10;
+const CHAT_TRIAL_MAX_CHATS = 1;
+
+const CHAT_CSS = `
+  /* ----- shared: the reorderable screenshot list (new + edit pages) ----- */
+  .shot-list { list-style: none; margin: 0; padding: 0; }
+  .shot-list li.shot {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px; margin-bottom: 8px;
+    background: #fff; border: 1px solid var(--border); border-radius: 10px;
+  }
+  .shot-list li.shot.sortable-ghost { opacity: 0.35; }
+  .shot-list li.shot.sortable-chosen { box-shadow: 0 6px 20px -6px rgba(0,0,0,0.25); }
+  .shot-handle {
+    flex: 0 0 auto; cursor: grab; color: #94a3b8; font-size: 18px; line-height: 1;
+    padding: 8px 4px; touch-action: none; user-select: none;
+  }
+  .shot-handle:active { cursor: grabbing; }
+  .shot-num {
+    flex: 0 0 auto; min-width: 26px; height: 26px; border-radius: 99px;
+    background: var(--brand); color: #fff; font-size: 13px; font-weight: 700;
+    display: inline-flex; align-items: center; justify-content: center; padding: 0 7px;
+  }
+  .shot-thumb {
+    flex: 0 0 auto; width: 46px; height: 46px; object-fit: cover;
+    border-radius: 8px; background: #f1f5f9; border: 1px solid var(--border);
+    cursor: zoom-in;
+  }
+  .shot-meta { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+  .shot-name { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .shot-sub { font-size: 11px; color: var(--muted); }
+  .shot-actions { flex: 0 0 auto; display: flex; gap: 4px; }
+  .shot-actions button {
+    width: 32px; height: 32px; border-radius: 8px; border: 1px solid var(--border);
+    background: #fff; cursor: pointer; font-size: 14px; line-height: 1; color: #475569;
+  }
+  .shot-actions button:hover { background: #f3f4f6; }
+  .shot-actions button:disabled { opacity: 0.3; cursor: not-allowed; }
+  .shot-actions .shot-del { color: var(--err); border-color: #fecaca; }
+  .shot-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin: 4px 0 10px; }
+  .shot-count { font-size: 14px; font-weight: 600; }
+  .chat-progress { display: none; }
+  .chat-progress.on { display: block; }
+  .chat-progress-track { height: 8px; background: #e5e7eb; border-radius: 99px; overflow: hidden; }
+  .chat-progress-fill { height: 100%; width: 0%; background: var(--brand); transition: width .2s ease; }
+  .chat-progress-text { font-size: 13px; color: var(--muted); margin-top: 6px; }
+
+  /* ----- the chat card on /chats ----- */
+  .chat-card { display: flex; gap: 12px; align-items: flex-start; }
+  .chat-strip { flex: 0 0 auto; display: flex; gap: 3px; }
+  .chat-strip img { width: 34px; height: 46px; object-fit: cover; object-position: top; border-radius: 5px; border: 1px solid var(--border); background: #f1f5f9; }
+  .chat-card-body { flex: 1 1 auto; min-width: 0; }
+
+  /* ----- the public viewer at /c/<slug> ----- */
+  main.chat-main { max-width: 520px; padding: 0 0 48px; }
+  .chat-head { padding: 16px 18px 12px; }
+  .chat-head h1 { font-size: 20px; margin: 0 0 2px; }
+  .chat-scroll { background: #fff; border-left: 1px solid var(--border); border-right: 1px solid var(--border); }
+  /* display:block kills the inline-element baseline gap that would otherwise
+     draw a hairline seam between consecutive screenshots. */
+  .chat-shot { display: block; width: 100%; height: auto; cursor: zoom-in; background: #fff; }
+  .chat-foot { padding: 18px; text-align: center; }
+  .chat-bar { position: fixed; top: 0; left: 0; height: 3px; background: var(--brand); width: 0%; z-index: 50; transition: width .08s linear; }
+  .chat-pos {
+    position: fixed; right: 12px; bottom: 12px; z-index: 50;
+    background: rgba(15,23,42,0.82); color: #fff; font-size: 12px; font-weight: 600;
+    padding: 6px 11px; border-radius: 99px; opacity: 0; transition: opacity .25s;
+    pointer-events: none; backdrop-filter: blur(4px);
+  }
+  .chat-pos.on { opacity: 1; }
+  .lightbox { position: fixed; inset: 0; z-index: 9998; background: rgba(0,0,0,0.92); display: none; overflow: auto; -webkit-overflow-scrolling: touch; }
+  .lightbox.on { display: block; }
+  .lightbox img { display: block; width: 100%; height: auto; margin: 0 auto; }
+  .lightbox-close {
+    position: fixed; top: 10px; right: 10px; z-index: 9999;
+    width: 40px; height: 40px; border-radius: 99px; border: 0;
+    background: rgba(255,255,255,0.9); color: #0f172a; font-size: 20px; cursor: pointer;
+  }
+  .lightbox-dl {
+    position: fixed; bottom: 14px; left: 50%; transform: translateX(-50%); z-index: 9999;
+    background: rgba(255,255,255,0.92); color: #0f172a; text-decoration: none;
+    padding: 10px 18px; border-radius: 99px; font-size: 14px; font-weight: 600;
+  }
+`;
+
+// Shared client-side helpers for both chat editors. Kept as plain string
+// concatenation (no template literals) because this whole block lives inside
+// a server-side template literal.
+const CHAT_SHARED_JS = `
+  function chatFmtBytes(b) {
+    if (!b) return '0 B';
+    var u = ['B','KB','MB','GB']; var i = 0; var n = b;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return (n < 10 && i > 0 ? n.toFixed(1) : Math.round(n)) + ' ' + u[i];
+  }
+  function chatEsc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[c];
+    });
+  }
+  // Screenshots of one conversation are captured in order, so capture time is
+  // almost always the order the reader wants. Timestamps that are all
+  // identical (some pickers zero them out) are useless, so fall back to a
+  // natural filename sort — IMG_9 before IMG_10, not after.
+  function chatSortCaptureOrder(files) {
+    var stamps = files.map(function (f) { return f.lastModified || 0; });
+    var allSame = stamps.every(function (s) { return s === stamps[0]; });
+    return files.slice().sort(function (a, b) {
+      if (!allSame) return (a.lastModified || 0) - (b.lastModified || 0);
+      return a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' });
+    });
+  }
+  function chatBindDropzone(zone, input, onFiles) {
+    ['dragenter','dragover'].forEach(function (ev) {
+      zone.addEventListener(ev, function (e) { e.preventDefault(); e.stopPropagation(); zone.classList.add('is-dragover'); });
+    });
+    ['dragleave','drop'].forEach(function (ev) {
+      zone.addEventListener(ev, function (e) { e.preventDefault(); e.stopPropagation(); zone.classList.remove('is-dragover'); });
+    });
+    zone.addEventListener('drop', function (e) {
+      if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length) onFiles(e.dataTransfer.files);
+    });
+    input.addEventListener('change', function () {
+      if (input.files && input.files.length) onFiles(input.files);
+      // Reset so picking the same file twice in a row still fires 'change'.
+      input.value = '';
+    });
+  }
+  // Wait for the drag library, but give up after ~3s instead of polling
+  // forever. Every reorder is also reachable through the ↑/↓ buttons, so
+  // losing drag degrades the page rather than breaking it.
+  function chatWhenSortable(fn, tries) {
+    tries = tries || 0;
+    if (typeof Sortable !== 'undefined') return fn();
+    if (tries > 60) {
+      console.warn('[chat] drag library unavailable — use the up/down buttons to reorder');
+      return;
+    }
+    setTimeout(function () { chatWhenSortable(fn, tries + 1); }, 50);
+  }
+  function chatRenumber(listEl) {
+    Array.prototype.forEach.call(listEl.querySelectorAll('.shot'), function (li, i) {
+      var n = li.querySelector('.shot-num');
+      if (n) n.textContent = i + 1;
+      var up = li.querySelector('.shot-up');
+      var down = li.querySelector('.shot-down');
+      if (up) up.disabled = i === 0;
+      if (down) down.disabled = i === listEl.querySelectorAll('.shot').length - 1;
+    });
+  }
+`;
+
+// ---- create page: pick → arrange locally → upload in the chosen order ----
+const CHAT_NEW_JS = `
+(function () {
+  ${CHAT_SHARED_JS}
+
+  var CAP = window.__CHAT_CAP || 60;
+  var IMAGE_CAP = window.__IMAGE_CAP || 26214400;
+
+  var picker    = document.getElementById('chat-file');
+  var dropzone  = document.getElementById('chat-dropzone');
+  var wrap      = document.getElementById('shot-wrap');
+  var listEl    = document.getElementById('shot-list');
+  var countEl   = document.getElementById('shot-count');
+  var createBtn = document.getElementById('chat-create');
+  var retryBtn  = document.getElementById('chat-retry');
+  var errEl     = document.getElementById('chat-err');
+  var progEl    = document.getElementById('chat-progress');
+  var fillEl    = document.getElementById('chat-progress-fill');
+  var textEl    = document.getElementById('chat-progress-text');
+  var doneEl    = document.getElementById('chat-done');
+  var titleEl   = document.getElementById('chat-title');
+  var dlEl      = document.getElementById('chat-dl');
+
+  var shots = [];      // { key, file, url, w, h, done, frac }
+  var nextKey = 1;
+  var chatSlug = null; // set once the draft exists, so a retry resumes it
+
+  function showErr(msg) {
+    errEl.textContent = msg || '';
+    errEl.style.display = msg ? 'block' : 'none';
+  }
+
+  function measure(shot) {
+    return new Promise(function (resolve) {
+      var img = new Image();
+      img.onload = function () { shot.w = img.naturalWidth; shot.h = img.naturalHeight; resolve(); };
+      img.onerror = function () { resolve(); };
+      img.src = shot.url;
+    });
+  }
+
+  function addFiles(fileList) {
+    var incoming = Array.prototype.slice.call(fileList || []);
+    if (!incoming.length) return;
+
+    var rejected = [];
+    incoming = incoming.filter(function (f) {
+      if (f.type && f.type.indexOf('image/') !== 0) { rejected.push(chatEsc(f.name) + ' is not an image'); return false; }
+      if (f.size > IMAGE_CAP) { rejected.push(f.name + ' is ' + chatFmtBytes(f.size) + ' (max ' + chatFmtBytes(IMAGE_CAP) + ')'); return false; }
+      return true;
+    });
+    incoming = chatSortCaptureOrder(incoming);
+
+    var room = CAP - shots.length;
+    if (incoming.length > room) {
+      rejected.push('only ' + CAP + ' screenshots fit in one scroll, so the extras were left out');
+      incoming = incoming.slice(0, Math.max(0, room));
+    }
+
+    var added = incoming.map(function (f) {
+      var s = { key: nextKey++, file: f, url: URL.createObjectURL(f), w: 0, h: 0, done: false, frac: 0 };
+      shots.push(s);
+      return s;
+    });
+
+    showErr(rejected.join(' · '));
+    render();
+    Promise.all(added.map(measure));
+  }
+
+  function render() {
+    listEl.innerHTML = shots.map(function (s, i) {
+      return '<li class="shot" data-key="' + s.key + '">' +
+        '<span class="shot-handle" title="Drag to reorder">&#10265;</span>' +
+        '<span class="shot-num">' + (i + 1) + '</span>' +
+        '<img class="shot-thumb" src="' + s.url + '" alt="">' +
+        '<span class="shot-meta">' +
+          '<span class="shot-name">' + chatEsc(s.file.name) + '</span>' +
+          '<span class="shot-sub">' + chatFmtBytes(s.file.size) + '</span>' +
+        '</span>' +
+        '<span class="shot-actions">' +
+          '<button type="button" class="shot-up" title="Move up">&#8593;</button>' +
+          '<button type="button" class="shot-down" title="Move down">&#8595;</button>' +
+          '<button type="button" class="shot-del" title="Remove">&#10005;</button>' +
+        '</span>' +
+      '</li>';
+    }).join('');
+    chatRenumber(listEl);
+    countEl.textContent = shots.length + ' screenshot' + (shots.length === 1 ? '' : 's');
+    wrap.style.display = shots.length ? 'block' : 'none';
+    createBtn.disabled = shots.length === 0;
+    createBtn.textContent = shots.length
+      ? 'Create the scroll link (' + shots.length + ' screenshot' + (shots.length === 1 ? '' : 's') + ')'
+      : 'Create the scroll link';
+  }
+
+  function indexOfKey(key) {
+    for (var i = 0; i < shots.length; i++) if (shots[i].key === key) return i;
+    return -1;
+  }
+
+  // After a drag, take the DOM's word for the order rather than re-rendering
+  // — re-rendering mid-gesture would rip out the node Sortable is animating.
+  function syncFromDom() {
+    var order = Array.prototype.map.call(listEl.querySelectorAll('.shot'), function (li) {
+      return parseInt(li.dataset.key, 10);
+    });
+    shots.sort(function (a, b) { return order.indexOf(a.key) - order.indexOf(b.key); });
+    chatRenumber(listEl);
+  }
+
+  chatBindDropzone(dropzone, picker, addFiles);
+
+  listEl.addEventListener('click', function (e) {
+    var btn = e.target.closest('button');
+    if (!btn) return;
+    var li = btn.closest('.shot');
+    if (!li) return;
+    var i = indexOfKey(parseInt(li.dataset.key, 10));
+    if (i < 0) return;
+    if (btn.classList.contains('shot-up') && i > 0) {
+      shots.splice(i - 1, 0, shots.splice(i, 1)[0]);
+    } else if (btn.classList.contains('shot-down') && i < shots.length - 1) {
+      shots.splice(i + 1, 0, shots.splice(i, 1)[0]);
+    } else if (btn.classList.contains('shot-del')) {
+      URL.revokeObjectURL(shots[i].url);
+      shots.splice(i, 1);
+    } else { return; }
+    render();
+  });
+
+  document.getElementById('shot-reverse').addEventListener('click', function () {
+    shots.reverse();
+    render();
+  });
+  document.getElementById('shot-clear').addEventListener('click', function () {
+    shots.forEach(function (s) { URL.revokeObjectURL(s.url); });
+    shots = [];
+    render();
+    showErr('');
+  });
+
+  chatWhenSortable(function () {
+    Sortable.create(listEl, {
+      animation: 160,
+      handle: '.shot-handle',
+      draggable: '.shot',
+      ghostClass: 'sortable-ghost',
+      chosenClass: 'sortable-chosen',
+      touchStartThreshold: 5,
+      onEnd: syncFromDom,
+    });
+  });
+
+  // ---- upload ----
+
+  function paint() {
+    var total = shots.length || 1;
+    var sum = shots.reduce(function (acc, s) { return acc + (s.done ? 1 : (s.frac || 0)); }, 0);
+    fillEl.style.width = Math.round((sum / total) * 100) + '%';
+  }
+
+  function uploadOne(slug, shot) {
+    return new Promise(function (resolve, reject) {
+      var fd = new FormData();
+      fd.append('file', shot.file, shot.file.name);
+      fd.append('width', String(shot.w || 0));
+      fd.append('height', String(shot.h || 0));
+      var xhr = new XMLHttpRequest();
+      xhr.open('POST', '/api/chats/' + encodeURIComponent(slug) + '/items');
+      xhr.upload.addEventListener('progress', function (e) {
+        if (e.lengthComputable) { shot.frac = e.loaded / e.total; paint(); }
+      });
+      xhr.onload = function () {
+        var data = null;
+        try { data = JSON.parse(xhr.responseText); } catch (err) {}
+        if (xhr.status >= 200 && xhr.status < 300 && data && data.ok) {
+          shot.done = true; shot.frac = 1; paint(); resolve(data);
+        } else {
+          reject(new Error((data && data.error) || 'Upload failed on ' + shot.file.name));
+        }
+      };
+      xhr.onerror = function () { reject(new Error('Lost connection while uploading ' + shot.file.name + '.')); };
+      xhr.send(fd);
+    });
+  }
+
+  function success(link, count) {
+    document.getElementById('chat-form').style.display = 'none';
+    doneEl.style.display = 'block';
+    doneEl.innerHTML =
+      '<div class="card">' +
+        '<h2 style="margin:0 0 6px;">&#9989; Your chat scroll is live</h2>' +
+        '<p class="muted" style="font-size:14px;">' + count + ' screenshot' + (count === 1 ? '' : 's') + ', in your order. Send this one link — they just scroll.</p>' +
+        '<input type="text" readonly id="done-link" value="' + chatEsc(link) + '" style="width:100%; margin-bottom:10px;">' +
+        '<div class="row">' +
+          '<button type="button" class="btn" id="done-copy">Copy link</button>' +
+          '<a class="btn btn-secondary" href="' + chatEsc(link) + '" target="_blank" rel="noopener">Open</a>' +
+          '<a class="btn btn-secondary" href="/chats/' + encodeURIComponent(chatSlug) + '/edit">Edit order</a>' +
+        '</div>' +
+      '</div>' +
+      '<a class="btn btn-secondary btn-block" href="/chats/new">Create another</a>';
+    document.getElementById('done-copy').addEventListener('click', async function () {
+      var btn = this;
+      try {
+        await navigator.clipboard.writeText(link);
+        btn.textContent = 'Copied!';
+        setTimeout(function () { btn.textContent = 'Copy link'; }, 1500);
+      } catch (err) {
+        document.getElementById('done-link').select();
+        btn.textContent = 'Press Cmd/Ctrl+C';
+      }
+    });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  async function run() {
+    if (!shots.length) return;
+    showErr('');
+    retryBtn.style.display = 'none';
+    createBtn.disabled = true;
+    progEl.classList.add('on');
+    paint();
+
+    try {
+      if (!chatSlug) {
+        var res = await fetch('/api/chats', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'same-origin',
+          body: JSON.stringify({ title: titleEl.value.trim(), allow_download: !!dlEl.checked }),
+        });
+        var d = await res.json();
+        if (!res.ok || !d.ok) throw new Error(d.error || 'Could not start the upload.');
+        chatSlug = d.slug;
+      }
+
+      // Strictly sequential: each screenshot's position is assigned server-side
+      // in arrival order, so uploading in parallel would scramble the sequence
+      // the user just spent time arranging.
+      for (var i = 0; i < shots.length; i++) {
+        if (shots[i].done) continue;
+        textEl.textContent = 'Uploading screenshot ' + (i + 1) + ' of ' + shots.length + '…';
+        await uploadOne(chatSlug, shots[i]);
+      }
+
+      textEl.textContent = 'Building your link…';
+      var fin = await fetch('/api/chats/' + encodeURIComponent(chatSlug) + '/finalize', {
+        method: 'POST', credentials: 'same-origin',
+      });
+      var fdata = await fin.json();
+      if (!fin.ok || !fdata.ok) throw new Error(fdata.error || 'Could not publish the scroll.');
+      success(fdata.shareLink, fdata.count);
+    } catch (err) {
+      progEl.classList.remove('on');
+      showErr(err.message);
+      createBtn.disabled = false;
+      var pending = shots.filter(function (s) { return !s.done; }).length;
+      if (chatSlug && pending && pending < shots.length) {
+        retryBtn.textContent = 'Retry the ' + pending + ' that did not upload';
+        retryBtn.style.display = 'block';
+      }
+    }
+  }
+
+  createBtn.addEventListener('click', run);
+  retryBtn.addEventListener('click', run);
+
+  // A half-finished draft is swept server-side after 24h, but warn anyway —
+  // leaving mid-upload loses the screenshots that hadn't gone up yet.
+  window.addEventListener('beforeunload', function (e) {
+    var uploading = chatSlug && shots.some(function (s) { return !s.done; }) && progEl.classList.contains('on');
+    if (uploading) { e.preventDefault(); e.returnValue = ''; }
+  });
+
+  render();
+})();
+`;
+
+// ---- edit page: reorder / remove / append against a chat that already exists ----
+const CHAT_EDIT_JS = `
+(function () {
+  ${CHAT_SHARED_JS}
+
+  var SLUG = window.__CHAT_SLUG;
+  var CAP = window.__CHAT_CAP || 60;
+  var IMAGE_CAP = window.__IMAGE_CAP || 26214400;
+
+  var listEl   = document.getElementById('shot-list');
+  var countEl  = document.getElementById('shot-count');
+  var picker   = document.getElementById('chat-file');
+  var dropzone = document.getElementById('chat-dropzone');
+  var errEl    = document.getElementById('chat-err');
+  var progEl   = document.getElementById('chat-progress');
+  var fillEl   = document.getElementById('chat-progress-fill');
+  var textEl   = document.getElementById('chat-progress-text');
+
+  function showErr(msg) {
+    errEl.textContent = msg || '';
+    errEl.style.display = msg ? 'block' : 'none';
+  }
+  function count() { return listEl.querySelectorAll('.shot').length; }
+  function refreshCount() {
+    var n = count();
+    countEl.textContent = n + ' screenshot' + (n === 1 ? '' : 's');
+    chatRenumber(listEl);
+  }
+
+  async function saveOrder() {
+    var ids = Array.prototype.map.call(listEl.querySelectorAll('.shot'), function (li) {
+      return parseInt(li.dataset.id, 10);
+    });
+    try {
+      var res = await fetch('/api/chats/' + encodeURIComponent(SLUG) + '/reorder', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ ids: ids }),
+      });
+      if (!res.ok) throw new Error('Save failed');
+      showErr('');
+    } catch (err) {
+      showErr('Could not save the new order — reload and try again.');
+    }
+  }
+
+  chatWhenSortable(function () {
+    Sortable.create(listEl, {
+      animation: 160,
+      handle: '.shot-handle',
+      draggable: '.shot',
+      ghostClass: 'sortable-ghost',
+      chosenClass: 'sortable-chosen',
+      touchStartThreshold: 5,
+      onEnd: function (evt) {
+        if (evt.oldIndex === evt.newIndex) return;
+        refreshCount();
+        saveOrder();
+      },
+    });
+  });
+
+  listEl.addEventListener('click', function (e) {
+    var btn = e.target.closest('button');
+    if (!btn) return;
+    var li = btn.closest('.shot');
+    if (!li) return;
+
+    if (btn.classList.contains('shot-up')) {
+      var prev = li.previousElementSibling;
+      if (!prev) return;
+      listEl.insertBefore(li, prev);
+      refreshCount(); saveOrder(); return;
+    }
+    if (btn.classList.contains('shot-down')) {
+      var next = li.nextElementSibling;
+      if (!next) return;
+      listEl.insertBefore(next, li);
+      refreshCount(); saveOrder(); return;
+    }
+    if (btn.classList.contains('shot-del')) {
+      if (count() <= 1) { showErr('A chat scroll needs at least one screenshot. Delete the whole scroll instead.'); return; }
+      window.__confirmDelete({
+        title: 'Remove this screenshot?',
+        message: 'It is removed from the scroll and from storage. This cannot be reversed.',
+        then: async function () {
+          var res = await fetch('/api/chats/' + encodeURIComponent(SLUG) + '/items/' + li.dataset.id + '/delete', {
+            method: 'POST', credentials: 'same-origin',
+          });
+          if (res.ok) { li.remove(); refreshCount(); }
+          else { showErr('Could not remove that screenshot.'); }
+        },
+      });
+    }
+  });
+
+  document.getElementById('shot-reverse').addEventListener('click', function () {
+    var items = Array.prototype.slice.call(listEl.querySelectorAll('.shot'));
+    items.reverse().forEach(function (li) { listEl.appendChild(li); });
+    refreshCount();
+    saveOrder();
+  });
+
+  // ---- settings ----
+  document.getElementById('chat-save').addEventListener('click', async function () {
+    var btn = this;
+    btn.disabled = true;
+    try {
+      var res = await fetch('/api/chats/' + encodeURIComponent(SLUG) + '/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({
+          title: document.getElementById('chat-title').value.trim(),
+          allow_download: !!document.getElementById('chat-dl').checked,
+        }),
+      });
+      if (!res.ok) throw new Error('Save failed');
+      var saved = document.getElementById('chat-saved');
+      saved.style.display = 'block';
+      setTimeout(function () { saved.style.display = 'none'; }, 2000);
+    } catch (err) {
+      showErr('Could not save. Try again.');
+    } finally { btn.disabled = false; }
+  });
+
+  document.querySelectorAll('.chat-copy').forEach(function (btn) {
+    btn.addEventListener('click', async function () {
+      try {
+        await navigator.clipboard.writeText(btn.dataset.url);
+        var prev = btn.textContent; btn.textContent = 'Copied!';
+        setTimeout(function () { btn.textContent = prev; }, 1500);
+      } catch (err) { btn.textContent = 'Copy failed'; }
+    });
+  });
+
+  document.getElementById('chat-delete').addEventListener('click', function () {
+    window.__confirmDelete({
+      title: 'Delete this chat scroll?',
+      message: 'The link stops working and every screenshot in it is removed from storage. This is permanent and cannot be reversed.',
+      then: async function () {
+        var res = await fetch('/api/chats/' + encodeURIComponent(SLUG) + '/delete', {
+          method: 'POST', credentials: 'same-origin',
+        });
+        if (res.ok) window.location.href = '/chats';
+        else showErr('Delete failed.');
+      },
+    });
+  });
+
+  // ---- append more screenshots ----
+
+  function measure(file) {
+    return new Promise(function (resolve) {
+      var url = URL.createObjectURL(file);
+      var img = new Image();
+      img.onload = function () { URL.revokeObjectURL(url); resolve({ w: img.naturalWidth, h: img.naturalHeight }); };
+      img.onerror = function () { URL.revokeObjectURL(url); resolve({ w: 0, h: 0 }); };
+      img.src = url;
+    });
+  }
+
+  function appendRow(data) {
+    var li = document.createElement('li');
+    li.className = 'shot';
+    li.dataset.id = data.id;
+    li.innerHTML =
+      '<span class="shot-handle" title="Drag to reorder">&#10265;</span>' +
+      '<span class="shot-num"></span>' +
+      '<img class="shot-thumb" src="' + data.thumb + '" alt="">' +
+      '<span class="shot-meta">' +
+        '<span class="shot-name">' + chatEsc(data.name) + '</span>' +
+        '<span class="shot-sub">' + chatFmtBytes(data.size) + '</span>' +
+      '</span>' +
+      '<span class="shot-actions">' +
+        '<button type="button" class="shot-up" title="Move up">&#8593;</button>' +
+        '<button type="button" class="shot-down" title="Move down">&#8595;</button>' +
+        '<button type="button" class="shot-del" title="Remove">&#10005;</button>' +
+      '</span>';
+    listEl.appendChild(li);
+  }
+
+  async function addFiles(fileList) {
+    var incoming = Array.prototype.slice.call(fileList || []);
+    if (!incoming.length) return;
+
+    var rejected = [];
+    incoming = incoming.filter(function (f) {
+      if (f.type && f.type.indexOf('image/') !== 0) { rejected.push(f.name + ' is not an image'); return false; }
+      if (f.size > IMAGE_CAP) { rejected.push(f.name + ' is ' + chatFmtBytes(f.size) + ' (max ' + chatFmtBytes(IMAGE_CAP) + ')'); return false; }
+      return true;
+    });
+    incoming = chatSortCaptureOrder(incoming);
+
+    var room = CAP - count();
+    if (incoming.length > room) {
+      rejected.push('this scroll only has room for ' + Math.max(0, room) + ' more');
+      incoming = incoming.slice(0, Math.max(0, room));
+    }
+    showErr(rejected.join(' · '));
+    if (!incoming.length) return;
+
+    progEl.classList.add('on');
+    for (var i = 0; i < incoming.length; i++) {
+      textEl.textContent = 'Adding screenshot ' + (i + 1) + ' of ' + incoming.length + '…';
+      fillEl.style.width = Math.round((i / incoming.length) * 100) + '%';
+      try {
+        var dims = await measure(incoming[i]);
+        var fd = new FormData();
+        fd.append('file', incoming[i], incoming[i].name);
+        fd.append('width', String(dims.w));
+        fd.append('height', String(dims.h));
+        var res = await fetch('/api/chats/' + encodeURIComponent(SLUG) + '/items', {
+          method: 'POST', body: fd, credentials: 'same-origin',
+        });
+        var data = await res.json();
+        if (!res.ok || !data.ok) throw new Error(data.error || 'Upload failed');
+        appendRow(data);
+        refreshCount();
+      } catch (err) {
+        showErr(err.message);
+        break;
+      }
+    }
+    fillEl.style.width = '100%';
+    setTimeout(function () { progEl.classList.remove('on'); fillEl.style.width = '0%'; }, 600);
+  }
+
+  chatBindDropzone(dropzone, picker, addFiles);
+  refreshCount();
+})();
+`;
+
+// ---- public viewer: scroll progress, position pill, tap-to-zoom ----
+const CHAT_VIEW_JS = `
+(function () {
+  var bar = document.getElementById('chat-bar');
+  var pos = document.getElementById('chat-pos');
+  var scroll = document.getElementById('chat-scroll');
+  var shots = Array.prototype.slice.call(scroll.querySelectorAll('.chat-shot'));
+  var total = shots.length;
+  var hideTimer = null;
+
+  function onScroll() {
+    var h = document.documentElement.scrollHeight - window.innerHeight;
+    var pct = h > 0 ? (window.scrollY / h) * 100 : 0;
+    bar.style.width = Math.max(0, Math.min(100, pct)) + '%';
+
+    // Which screenshot owns the middle of the viewport right now.
+    var mid = window.scrollY + window.innerHeight / 2;
+    var current = 1;
+    for (var i = 0; i < shots.length; i++) {
+      var top = shots[i].getBoundingClientRect().top + window.scrollY;
+      if (top <= mid) current = i + 1; else break;
+    }
+    pos.textContent = current + ' / ' + total;
+    pos.classList.add('on');
+    clearTimeout(hideTimer);
+    hideTimer = setTimeout(function () { pos.classList.remove('on'); }, 1200);
+  }
+
+  if (total > 1) {
+    window.addEventListener('scroll', onScroll, { passive: true });
+    window.addEventListener('resize', onScroll);
+    onScroll();
+  }
+
+  // Tap any screenshot to blow it up full width — chat text is small, and
+  // opening a new tab would cost the reader their place in the scroll.
+  var box = document.getElementById('lightbox');
+  var boxImg = document.getElementById('lightbox-img');
+  var boxDl = document.getElementById('lightbox-dl');
+  var closeBtn = document.getElementById('lightbox-close');
+  var savedScroll = 0;
+
+  function open(src) {
+    savedScroll = window.scrollY;
+    boxImg.src = src;
+    if (boxDl) boxDl.href = src;
+    box.classList.add('on');
+    box.scrollTop = 0;
+    document.body.style.overflow = 'hidden';
+  }
+  function close() {
+    box.classList.remove('on');
+    boxImg.src = '';
+    document.body.style.overflow = '';
+    window.scrollTo(0, savedScroll);
+  }
+
+  scroll.addEventListener('click', function (e) {
+    var img = e.target.closest('.chat-shot');
+    if (img) open(img.src);
+  });
+  closeBtn.addEventListener('click', close);
+  box.addEventListener('click', function (e) {
+    if (e.target === box || e.target === boxImg) close();
+  });
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && box.classList.contains('on')) close();
+  });
+})();
+`;
+
+/** Trial users get one chat scroll; regular users get as many as they like. */
+function chatGate(user) {
+  if (!user) return { ok: false, reason: 'Not logged in.' };
+  if (user.status === 'deactivated') return { ok: false, reason: 'Your account is deactivated. Contact the admin.' };
+  if (user.status === 'trial' && cdb.countReadyByUser(user.id) >= CHAT_TRIAL_MAX_CHATS) {
+    return {
+      ok: false,
+      reason: `Your trial allows ${CHAT_TRIAL_MAX_CHATS} chat scroll. Ask the admin to upgrade your account for unlimited scrolls.`,
+    };
+  }
+  return { ok: true };
+}
+
+function chatItemCap(user) {
+  return user && user.status === 'trial' ? CHAT_TRIAL_MAX_ITEMS : CHAT_MAX_ITEMS;
+}
+
+/** Best-effort GHL cleanup for a list of image urls owned by one user. */
+function purgeChatImages(urls, userRow) {
+  if (!urls || !urls.length) return;
+  let cfg = null;
+  try { cfg = users.effectiveGhlConfig(userRow); } catch { cfg = null; }
+  for (const u of urls) {
+    try { ghl.tryDeleteFromGhl(u, cfg); } catch {}
+  }
+}
+
+// Drop chats whose upload was abandoned before finalize. Called opportunistically
+// when someone opens the create page — no cron needed for something this cheap.
+function sweepStaleChatDrafts() {
+  try {
+    const urls = cdb.deleteStaleDrafts();
+    if (urls.length) {
+      console.log(`[chat-sweep] removed ${urls.length} orphan image(s) from abandoned drafts`);
+      for (const u of urls) { try { ghl.tryDeleteFromGhl(u); } catch {} }
+    }
+  } catch (e) { console.warn('[chat-sweep] failed:', e.message); }
+}
+
+// ---------- chats: list ----------
+
+app.get('/chats', requireUser, (req, res) => {
+  const rows = cdb.listByUser(req.user.id, { limit: 50 });
+  const gate = chatGate(req.user);
+
+  const cards = rows.map(c => {
+    const items = cdb.items(c.id).slice(0, 4);
+    const strip = items.map(i =>
+      `<img src="/cr/${escHtml(c.slug)}/${i.id}" alt="" loading="lazy">`
+    ).join('');
+    const link = `${PUBLIC_ORIGIN}/c/${c.slug}`;
+    return `
+      <div class="card chat-card" data-slug="${escHtml(c.slug)}">
+        <div class="chat-strip">${strip}</div>
+        <div class="chat-card-body">
+          <div style="font-weight:600; margin-bottom:2px;">💬 ${escHtml(c.title || 'Untitled chat')}</div>
+          <div class="muted" style="font-size:13px; margin-bottom:8px;">
+            ${c.item_count} screenshot${c.item_count === 1 ? '' : 's'}${c.download_allowed ? ' · downloads on' : ''}
+            ${fmtGstTimestamp(c.created_at) ? ' · ' + escHtml(fmtGstTimestamp(c.created_at)) : ''}
+          </div>
+          <div class="row">
+            <button type="button" class="btn btn-secondary chat-copy" data-url="${escHtml(link)}">Copy link</button>
+            <a class="btn btn-secondary" href="/c/${escHtml(c.slug)}" target="_blank" rel="noopener">Open</a>
+            <a class="btn btn-secondary" href="/chats/${escHtml(c.slug)}/edit">Edit</a>
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  res.send(layout({
+    title: 'Chat scrolls — ' + SITE_NAME,
+    user: req.user,
+    body: `
+      <h1>Chat scrolls</h1>
+      <p class="muted">A long conversation takes several screenshots. Put them in order once and share a single link that reads top to bottom, exactly like scrolling the real chat.</p>
+      ${gate.ok
+        ? `<a class="btn btn-block" href="/chats/new">➕ New chat scroll</a>`
+        : `<div class="card" style="border-left:4px solid #f59e0b;"><strong>Trial limit reached</strong><p class="muted" style="margin:6px 0 0; font-size:14px;">${escHtml(gate.reason)}</p></div>`}
+      ${rows.length ? cards : `<div class="recent-empty">No chat scrolls yet. Create one and the link will show up here.</div>`}
+      <script>
+        document.addEventListener('click', async function (e) {
+          var btn = e.target.closest('.chat-copy');
+          if (!btn) return;
+          try {
+            await navigator.clipboard.writeText(btn.dataset.url);
+            var prev = btn.textContent; btn.textContent = 'Copied!';
+            setTimeout(function () { btn.textContent = prev; }, 1500);
+          } catch (err) { btn.textContent = 'Copy failed — long-press the link'; }
+        });
+      </script>
+    `,
+  }));
+});
+
+// ---------- chats: create page ----------
+
+app.get('/chats/new', requireUser, (req, res) => {
+  sweepStaleChatDrafts();
+
+  const gate = chatGate(req.user);
+  if (!gate.ok) {
+    return res.send(layout({
+      title: 'Chat scrolls — ' + SITE_NAME,
+      user: req.user,
+      body: `<h1>Trial limit reached</h1><p>${escHtml(gate.reason)}</p><a class="btn btn-block" href="/chats">Back to chat scrolls</a>`,
+    }));
+  }
+
+  const cap = chatItemCap(req.user);
+
+  res.send(layout({
+    title: 'New chat scroll — ' + SITE_NAME,
+    user: req.user,
+    body: `
+      <h1>Share a chat</h1>
+      <p class="muted">Drop in your screenshots. They stack into one page the reader just scrolls — no zooming, no guessing which shot came first.</p>
+
+      <form class="card stack" id="chat-form" onsubmit="return false;">
+        <div>
+          <label for="chat-title">Title (optional)</label>
+          <input id="chat-title" type="text" placeholder="e.g. Chat with Sarah — Tuesday">
+        </div>
+
+        <div>
+          <label>Screenshots</label>
+          <div class="dropzone" id="chat-dropzone">
+            <input id="chat-file" type="file" accept="image/*" multiple>
+            <div class="dropzone-inner">
+              <div class="dropzone-icon" id="chat-dz-icon">🖼</div>
+              <div class="dropzone-text">
+                <strong>Drop your screenshots here</strong>
+                <span class="sub">or tap to choose from your phone · pick them all at once</span>
+              </div>
+            </div>
+          </div>
+          <p class="muted" style="font-size:12px; margin:6px 0 0;">
+            Up to ${cap} screenshots · ${fmtBytes(SIZE_CAPS.image)} each. They're sorted oldest first — drag to change the order.
+          </p>
+        </div>
+
+        <div id="shot-wrap" style="display:none;">
+          <div class="shot-toolbar">
+            <span class="shot-count" id="shot-count">0 screenshots</span>
+            <span class="row" style="flex:0 0 auto;">
+              <button type="button" class="btn btn-secondary btn-sm" id="shot-reverse">↕ Reverse order</button>
+              <button type="button" class="btn btn-secondary btn-sm" id="shot-clear">Clear all</button>
+            </span>
+          </div>
+          <ul class="shot-list" id="shot-list"></ul>
+          <p class="muted" style="font-size:12px; margin:2px 0 0;">Number 1 is the top of the scroll — the start of the conversation.</p>
+        </div>
+
+        <label class="checkbox-row" for="chat-dl">
+          <input id="chat-dl" type="checkbox">
+          <span>Allow viewers to download the screenshots
+            <span class="hint">When off, the page only shows them — no download button.</span>
+          </span>
+        </label>
+
+        <button type="button" class="btn btn-block" id="chat-create" disabled>Create the scroll link</button>
+
+        <div class="chat-progress" id="chat-progress" aria-live="polite">
+          <div class="chat-progress-track"><div class="chat-progress-fill" id="chat-progress-fill"></div></div>
+          <div class="chat-progress-text" id="chat-progress-text">Starting…</div>
+        </div>
+        <p class="err" id="chat-err" style="display:none;"></p>
+        <button type="button" class="btn btn-block" id="chat-retry" style="display:none;">Retry the ones that failed</button>
+      </form>
+
+      <div id="chat-done" style="display:none;"></div>
+
+      <script>
+        window.__CHAT_CAP = ${cap};
+        window.__IMAGE_CAP = ${SIZE_CAPS.image};
+        window.__ORIGIN = ${JSON.stringify(PUBLIC_ORIGIN)};
+      </script>
+      <script src="/vendor/sortable.min.js" defer></script>
+      <script defer>${CHAT_NEW_JS}</script>
+    `,
+  }));
+});
+
+// ---------- chats: edit page ----------
+
+app.get('/chats/:slug/edit', requireUser, (req, res) => {
+  const c = cdb.getBySlugForUser(req.params.slug, req.user.id);
+  if (!c) {
+    return res.status(404).send(layout({ title: 'Not found', user: req.user, body: `<h1>Not found</h1><p>That chat scroll doesn't exist.</p><a class="btn btn-block" href="/chats">Back to chat scrolls</a>` }));
+  }
+  const items = cdb.items(c.id);
+  const cap = chatItemCap(req.user);
+  const link = `${PUBLIC_ORIGIN}/c/${c.slug}`;
+
+  const rows = items.map((it, idx) => `
+    <li class="shot" data-id="${it.id}">
+      <span class="shot-handle" title="Drag to reorder">⠿</span>
+      <span class="shot-num">${idx + 1}</span>
+      <img class="shot-thumb" src="/cr/${escHtml(c.slug)}/${it.id}" alt="" loading="lazy">
+      <span class="shot-meta">
+        <span class="shot-name">${escHtml(it.original_filename || 'screenshot')}</span>
+        <span class="shot-sub">${fmtBytes(it.size_bytes)}</span>
+      </span>
+      <span class="shot-actions">
+        <button type="button" class="shot-up" title="Move up">↑</button>
+        <button type="button" class="shot-down" title="Move down">↓</button>
+        <button type="button" class="shot-del" title="Remove">✕</button>
+      </span>
+    </li>
+  `).join('');
+
+  res.send(layout({
+    title: 'Edit chat scroll — ' + SITE_NAME,
+    user: req.user,
+    body: `
+      <h1>Edit chat scroll</h1>
+      <div class="card">
+        <label for="chat-title">Title</label>
+        <input id="chat-title" type="text" value="${escHtml(c.title)}" placeholder="Untitled chat">
+        <label class="checkbox-row" for="chat-dl" style="margin-top:12px;">
+          <input id="chat-dl" type="checkbox" ${c.download_allowed ? 'checked' : ''}>
+          <span>Allow viewers to download the screenshots</span>
+        </label>
+        <div class="row" style="margin-top:12px;">
+          <button type="button" class="btn btn-secondary" id="chat-save">Save</button>
+          <button type="button" class="btn btn-secondary chat-copy" data-url="${escHtml(link)}">Copy link</button>
+          <a class="btn btn-secondary" href="/c/${escHtml(c.slug)}" target="_blank" rel="noopener">Open</a>
+        </div>
+        <p class="muted" id="chat-saved" style="font-size:13px; margin:8px 0 0; display:none;">Saved.</p>
+      </div>
+
+      <div class="card">
+        <div class="shot-toolbar">
+          <span class="shot-count" id="shot-count">${items.length} screenshot${items.length === 1 ? '' : 's'}</span>
+          <button type="button" class="btn btn-secondary btn-sm" id="shot-reverse">↕ Reverse order</button>
+        </div>
+        <ul class="shot-list" id="shot-list">${rows}</ul>
+        <p class="muted" style="font-size:12px; margin:2px 0 12px;">Drag the ⠿ handle to reorder. Number 1 is the top of the scroll. Changes save automatically.</p>
+
+        <div class="dropzone" id="chat-dropzone">
+          <input id="chat-file" type="file" accept="image/*" multiple>
+          <div class="dropzone-inner">
+            <div class="dropzone-icon">➕</div>
+            <div class="dropzone-text">
+              <strong>Add more screenshots</strong>
+              <span class="sub">they go to the end — drag them where you want</span>
+            </div>
+          </div>
+        </div>
+        <div class="chat-progress" id="chat-progress" aria-live="polite">
+          <div class="chat-progress-track"><div class="chat-progress-fill" id="chat-progress-fill"></div></div>
+          <div class="chat-progress-text" id="chat-progress-text">Starting…</div>
+        </div>
+        <p class="err" id="chat-err" style="display:none;"></p>
+      </div>
+
+      <div class="card">
+        <button type="button" class="btn btn-danger btn-block" id="chat-delete">Delete this chat scroll</button>
+      </div>
+
+      <script>
+        window.__CHAT_SLUG = ${JSON.stringify(c.slug)};
+        window.__CHAT_CAP = ${cap};
+        window.__IMAGE_CAP = ${SIZE_CAPS.image};
+      </script>
+      <script src="/vendor/sortable.min.js" defer></script>
+      <script defer>${CHAT_EDIT_JS}</script>
+    `,
+  }));
+});
+
+// ---------- chats: write APIs ----------
+
+app.post('/api/chats', requireUser, express.json(), (req, res) => {
+  const gate = chatGate(req.user);
+  if (!gate.ok) return res.status(403).json({ ok: false, error: gate.reason });
+
+  const title = (req.body.title || '').toString().trim().slice(0, 200);
+  const allowDownload = req.body.allow_download === true || req.body.allow_download === 'true';
+  const slug = nanoid(8);
+  cdb.create({ slug, user_id: req.user.id, title, download_allowed: allowDownload ? 1 : 0 });
+  console.log(`[chat] user=${req.user.id} created draft ${slug}`);
+  res.json({ ok: true, slug });
+});
+
+app.post('/api/chats/:slug/items', requireUser, upload.single('file'), async (req, res) => {
+  const file = req.file;
+  if (!file) return res.status(400).json({ ok: false, error: 'No image uploaded.' });
+
+  try {
+    const c = cdb.getBySlugForUser(req.params.slug, req.user.id);
+    if (!c) throw new Error('That chat scroll no longer exists.');
+
+    const fresh = udb.getById(req.user.id);
+    if (!fresh) throw new Error('Account not found.');
+    if (fresh.status === 'deactivated') throw new Error('Your account is deactivated. Contact the admin.');
+
+    const cls = classify(file.originalname, file.mimetype);
+    if (cls.kind !== 'image') throw new Error(`${file.originalname} isn't an image — a chat scroll only takes screenshots.`);
+    if (file.size > SIZE_CAPS.image) {
+      throw new Error(`${file.originalname} is ${fmtBytes(file.size)} but the limit is ${fmtBytes(SIZE_CAPS.image)} per screenshot.`);
+    }
+
+    const cap = chatItemCap(fresh);
+    const count = cdb.countItems(c.id);
+    if (count >= cap) throw new Error(`This scroll is full at ${cap} screenshots.`);
+
+    const position = cdb.nextPosition(c.id);
+    const uniq = nanoid(6);
+    const safeBase = sanitizeForFilename(c.title || 'chat');
+    const ghlDisplayName = `${safeBase}-${String(position + 1).padStart(3, '0')}-${uniq}.${cls.ghlExt}`;
+
+    const ghlCfg = users.effectiveGhlConfig(fresh);
+    const ghlUrl = ghl.uploadToGhl(file.path, ghlDisplayName, cls.ghlMime, ghlCfg);
+
+    // Width/height come from the browser, which already decoded the image to
+    // draw the thumbnail. Storing them lets the viewer reserve the right box
+    // per screenshot, so a lazy-loaded image never shifts the reader's place
+    // mid-scroll. Zero is a safe fallback — we just omit the attributes.
+    const width = Math.max(0, parseInt(req.body.width, 10) || 0);
+    const height = Math.max(0, parseInt(req.body.height, 10) || 0);
+
+    const itemId = cdb.addItem({
+      chat_id: c.id, position, ghl_url: ghlUrl,
+      original_filename: file.originalname,
+      mime_type: cls.mime, size_bytes: file.size,
+      width, height,
+    });
+    cdb.touch(c.id);
+
+    res.json({
+      ok: true, id: itemId, position,
+      thumb: `/cr/${c.slug}/${itemId}`,
+      name: file.originalname,
+      size: file.size,
+      count: count + 1,
+    });
+  } catch (err) {
+    console.error('[chat-item] failed:', err.message);
+    res.status(400).json({ ok: false, error: err.message || 'Upload failed' });
+  } finally {
+    try { fs.unlinkSync(file.path); } catch {}
+  }
+});
+
+app.post('/api/chats/:slug/finalize', requireUser, (req, res) => {
+  const c = cdb.getBySlugForUser(req.params.slug, req.user.id);
+  if (!c) return res.status(404).json({ ok: false, error: 'Not found.' });
+  const count = cdb.countItems(c.id);
+  if (count < 1) return res.status(400).json({ ok: false, error: 'Add at least one screenshot first.' });
+  cdb.markReady(c.id);
+  const shareLink = `${PUBLIC_ORIGIN}/c/${c.slug}`;
+  console.log(`[chat] user=${req.user.id} published ${c.slug} with ${count} screenshot(s)`);
+  res.json({ ok: true, slug: c.slug, shareLink, count });
+});
+
+app.post('/api/chats/:slug/reorder', requireUser, express.json({ limit: '100kb' }), (req, res) => {
+  const c = cdb.getBySlugForUser(req.params.slug, req.user.id);
+  if (!c) return res.status(404).json({ ok: false, error: 'Not found.' });
+  const ids = Array.isArray(req.body.ids) ? req.body.ids.slice(0, CHAT_MAX_ITEMS + 10) : [];
+  const n = cdb.reorder(c.id, ids);
+  res.json({ ok: true, count: n });
+});
+
+app.post('/api/chats/:slug/settings', requireUser, express.json(), (req, res) => {
+  const c = cdb.getBySlugForUser(req.params.slug, req.user.id);
+  if (!c) return res.status(404).json({ ok: false, error: 'Not found.' });
+  if (typeof req.body.title === 'string') cdb.setTitle(c.id, req.body.title.trim());
+  if (typeof req.body.allow_download === 'boolean') cdb.setDownload(c.id, req.body.allow_download);
+  res.json({ ok: true });
+});
+
+app.post('/api/chats/:slug/items/:id/delete', requireUser, (req, res) => {
+  const c = cdb.getBySlugForUser(req.params.slug, req.user.id);
+  if (!c) return res.status(404).json({ ok: false, error: 'Not found.' });
+  const removed = cdb.deleteItem(c.id, parseInt(req.params.id, 10));
+  if (!removed) return res.status(404).json({ ok: false, error: 'That screenshot is already gone.' });
+  // Close the gap left behind so positions stay 0..n-1.
+  cdb.reorder(c.id, cdb.items(c.id).map(i => i.id));
+  purgeChatImages([removed.ghl_url], udb.getById(req.user.id));
+  res.json({ ok: true, count: cdb.countItems(c.id) });
+});
+
+app.post('/api/chats/:slug/delete', requireUser, (req, res) => {
+  const userRow = udb.getById(req.user.id);
+  const urls = cdb.deleteForUser(req.params.slug, req.user.id);
+  if (urls == null) return res.status(404).json({ ok: false, error: 'Not found.' });
+  purgeChatImages(urls, userRow);
+  console.log(`[chat] user=${req.user.id} deleted ${req.params.slug} (${urls.length} image(s))`);
+  res.json({ ok: true });
+});
+
+// ---------- chats: image proxy ----------
+//
+// Same reasoning as /raw/<slug>: serve the bytes through us so the GHL CDN
+// URL never appears in the page source. A draft's images are owner-only —
+// the scroll isn't published yet, so nobody else should be able to pull
+// frames out of it by guessing the slug.
+
+app.get('/cr/:slug/:id', async (req, res) => {
+  const c = cdb.getBySlug(req.params.slug);
+  if (!c) return res.status(404).send('Not found');
+  if (c.status !== 'ready') {
+    const viewerUid = parseInt(req.signedCookies.uid, 10);
+    if (!Number.isFinite(viewerUid) || viewerUid !== c.user_id) return res.status(404).send('Not found');
+  }
+  const item = cdb.getItem(c.id, parseInt(req.params.id, 10));
+  if (!item) return res.status(404).send('Not found');
+
+  try {
+    const upstream = await fetch(item.ghl_url);
+    if (!upstream.ok || !upstream.body) return res.status(502).send('Upstream error');
+    res.status(200);
+    res.set('Content-Type', item.mime_type || 'image/jpeg');
+    const len = upstream.headers.get('content-length');
+    if (len) res.set('Content-Length', len);
+    res.set('Cache-Control', c.status === 'ready' ? 'public, max-age=86400' : 'private, max-age=0');
+    const { Readable } = require('node:stream');
+    Readable.fromWeb(upstream.body).pipe(res);
+  } catch (err) {
+    console.error('[chat-raw]', err);
+    res.status(502).send('Stream failed');
+  }
+});
+
+// ---------- chats: public viewer ----------
+
+app.get('/c/:slug', (req, res) => {
+  const c = cdb.getBySlug(req.params.slug);
+  if (!c || c.status !== 'ready') {
+    return res.status(404).send(layout({
+      title: 'Not found',
+      user: req.user,
+      body: `<h1>Not found</h1><p>This link does not exist or was removed.</p>`,
+    }));
+  }
+  res.set('X-Robots-Tag', 'noindex, nofollow');
+
+  const items = cdb.items(c.id);
+  pushOnFirstView({ slug: c.slug, user_id: c.user_id, title: c.title, original_filename: 'a chat scroll' }, req);
+
+  // width/height reserve the exact box each screenshot will occupy, so
+  // lazy-loading never yanks the page out from under the reader.
+  const shots = items.map((it, idx) => {
+    const dims = it.width > 0 && it.height > 0 ? ` width="${it.width}" height="${it.height}"` : '';
+    return `<img class="chat-shot" src="/cr/${escHtml(c.slug)}/${it.id}"${dims}` +
+           ` loading="${idx < 2 ? 'eager' : 'lazy'}" decoding="async"` +
+           ` alt="Screenshot ${idx + 1} of ${items.length}" data-n="${idx + 1}">`;
+  }).join('');
+
+  const title = c.title || 'Shared chat';
+  const first = items[0];
+
+  res.send(layout({
+    title: title + ' — ' + SITE_NAME,
+    user: req.user,
+    mainClass: 'chat-main',
+    ogTitle: title,
+    ogDescription: `${items.length} screenshot${items.length === 1 ? '' : 's'} · scroll to read the whole conversation`,
+    ogImageUrl: first ? `${PUBLIC_ORIGIN}/cr/${c.slug}/${first.id}` : '',
+    noindex: true,
+    body: `
+      <div class="chat-bar" id="chat-bar"></div>
+      <div class="chat-head">
+        <h1>💬 ${escHtml(title)}</h1>
+        <p class="muted" style="margin:0; font-size:13px;">${items.length} screenshot${items.length === 1 ? '' : 's'} · scroll to read it all</p>
+      </div>
+      <div class="chat-scroll" id="chat-scroll">${shots}</div>
+      <div class="chat-foot">
+        <p class="muted" style="font-size:13px; margin:0;">End of the conversation · shared from ${escHtml(SITE_NAME)}</p>
+      </div>
+      <div class="chat-pos" id="chat-pos">1 / ${items.length}</div>
+      <div class="lightbox" id="lightbox">
+        <button type="button" class="lightbox-close" id="lightbox-close" aria-label="Close">✕</button>
+        <img id="lightbox-img" alt="">
+        ${c.download_allowed ? `<a class="lightbox-dl" id="lightbox-dl" href="#" download>⬇ Download this screenshot</a>` : ''}
+      </div>
+      <script>${CHAT_VIEW_JS}</script>
+    `,
+  }));
+});
+
 // ---------- owner-scoped APIs ----------
 
 app.get('/api/recent', requireUser, (req, res) => {
@@ -4407,9 +5649,13 @@ app.post('/admin/users/:id/delete', requireUser, requireAdmin, (req, res) => {
   // handles everything they uploaded before customizing.
   const userCfg = users.effectiveGhlConfig(target);
   const urls = fdb.deleteAllByUser(id);
+  // Chat rows cascade away with the user, but the images behind them live in
+  // GHL — collect their URLs before the cascade so they don't leak.
+  const chatUrls = cdb.listUrlsByUser(id);
   udb.deleteById(id);
   for (const u of urls) { try { ghl.tryDeleteFromGhl(u, userCfg); } catch {} }
-  res.json({ ok: true, deletedFiles: urls.length });
+  for (const u of chatUrls) { try { ghl.tryDeleteFromGhl(u, userCfg); } catch {} }
+  res.json({ ok: true, deletedFiles: urls.length, deletedChatImages: chatUrls.length });
 });
 
 // ---------- healthz ----------

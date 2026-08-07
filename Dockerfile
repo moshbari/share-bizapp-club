@@ -22,6 +22,11 @@ RUN npm install --omit=dev --no-audit --no-fund
 COPY server.js ./
 COPY lib ./lib
 
+# Static assets we serve ourselves (currently the vendored SortableJS used by
+# the chat-scroll editor). Copied before the PDF.js step below, which mkdir -p's
+# into the same /app/public tree.
+COPY public ./public
+
 # Pull the prebuilt PDF.js viewer (Mozilla's zip release) and unpack into
 # /app/public/pdfjs. The npm package `pdfjs-dist` only ships the library
 # bundle (pdf_viewer.mjs) — the standalone `web/viewer.html` we need to

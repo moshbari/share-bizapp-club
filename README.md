@@ -24,6 +24,36 @@ Coolify), different focus.
 - The owner picks per-file whether downloads are allowed. When off, no
   download button shows.
 
+## Chat scrolls
+
+A long conversation doesn't fit in one screenshot, so people take a run of
+them. Five separate share links are useless — the reader has to open each one
+and guess the order. A **chat scroll** stacks them edge-to-edge on one page at
+`/c/<slug>`, so scrolling the page is scrolling the conversation.
+
+- `/chats/new` — pick the screenshots (drag-and-drop, or the phone's photo
+  picker; multi-select). They're ordered by **capture time** by default, which
+  is nearly always the order the reader wants, falling back to a natural
+  filename sort when the timestamps are useless.
+- Each one gets a serial number, a thumbnail, and a drag handle. Reorder by
+  dragging, or with the ↑/↓ buttons (which also cover the case where the drag
+  library fails to load). Number 1 is the top of the scroll.
+- Ordering happens **in the browser, before anything uploads** — thumbnails are
+  local object URLs, so rearranging costs no round-trips. The upload then runs
+  strictly sequentially, because position is assigned server-side in arrival
+  order.
+- `/chats/<slug>/edit` — reorder, remove, append more, rename, toggle
+  downloads, delete. Reorders save automatically.
+- The viewer reserves each screenshot's exact box (width/height are captured in
+  the browser at pick time), so lazy-loading never yanks the page out from under
+  the reader. Tap any screenshot to zoom without losing your place.
+
+A chat's images are **not** rows in `files` — they have no share link of their
+own and don't appear in the recent-shares list. Trial accounts get one scroll
+of up to 10 screenshots; regular accounts get unlimited scrolls of up to 60.
+A scroll stays a hidden `draft` until every image has uploaded; abandoned
+drafts are swept (DB + GHL) after 24h.
+
 ## Per-type size limits (matches GHL's **API** caps)
 
 | Kind   | Limit |
