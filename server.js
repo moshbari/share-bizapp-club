@@ -17,7 +17,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 
-const { users: udb, files: fdb, passwordResets: prdb, magicLinks: mldb, messages: mdb, groups: gdb, feed: feeddb, chats: cdb, apiTokens: atdb, deviceTokens: dtdb } = require('./lib/db');
+const { users: udb, files: fdb, passwordResets: prdb, magicLinks: mldb, messages: mdb, groups: gdb, feed: feeddb, chats: cdb, apiTokens: atdb, deviceTokens: dtdb, NOTES_MAX_CHARS } = require('./lib/db');
 const users = require('./lib/users');
 const ghl = require('./lib/ghl');
 const transcode = require('./lib/transcode');
@@ -320,6 +320,25 @@ const BASE_CSS = `
   .markdown-body th, .markdown-body td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
   .markdown-body img { max-width: 100%; height: auto; }
   .markdown-body a { color: var(--brand); }
+  /* Notes — the copyable text that rides along with any share */
+  .notes-card { padding: 14px 16px 16px; }
+  .notes-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+  .notes-title { font-weight: 700; font-size: 15px; }
+  .notes-body {
+    background: #0f172a; color: #e2e8f0; padding: 14px; border-radius: 8px; margin: 0;
+    white-space: pre-wrap; word-break: break-word; overflow-x: auto;
+    font: 13px/1.55 ui-monospace, "SF Mono", Menlo, monospace;
+    max-height: 60vh; overflow-y: auto; user-select: text;
+  }
+  .notes-copy { flex: 0 0 auto; white-space: nowrap; }
+  /* The notes editor (upload form + edit modal) */
+  textarea.notes-input {
+    width: 100%; min-height: 96px; resize: vertical; padding: 12px 14px;
+    border: 1px solid var(--border); border-radius: 10px; background: #fff; color: var(--fg);
+    font: 14px/1.5 ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  textarea.notes-input:focus { outline: none; border-color: var(--brand); box-shadow: 0 0 0 3px rgba(37,99,235,0.15); }
+  .notes-badge { display: inline-block; font-size: 12px; color: var(--muted); }
 `;
 
 // ---------- layout ----------
@@ -366,7 +385,7 @@ function layout({ title, body, user, ogTitle, ogDescription, ogImageUrl, noindex
   <title>${escHtml(title)}</title>
   ${noindex ? '<meta name="robots" content="noindex,nofollow">' : ''}
   ${og}
-  <style>${BASE_CSS}${DEL_MODAL_CSS}${CHAT_CSS}</style>
+  <style>${BASE_CSS}${DEL_MODAL_CSS}${NOTES_MODAL_CSS}${CHAT_CSS}</style>
 </head>
 <body>
   <header class="site-header">
@@ -380,7 +399,9 @@ function layout({ title, body, user, ogTitle, ogDescription, ogImageUrl, noindex
     ${body}
   </main>
   ${DEL_MODAL_HTML}
+  ${NOTES_MODAL_HTML}
   <script>${DEL_MODAL_JS}</script>
+  <script>${NOTES_MODAL_JS}</script>
 </body>
 </html>`;
 }
@@ -524,6 +545,114 @@ const DEL_MODAL_JS = `
   })();
 `;
 
+// ---------- shared notes editor modal ----------
+//
+// Notes are multi-line by nature (a pasted prompt is the whole point), so
+// the browser's prompt() — single-line, no newlines — is the wrong tool.
+// This is the same modal shape as the delete confirm, with a textarea.
+// window.__editNotes({ value, title, then(text) }) opens it; `then` fires
+// with the new text only if the user saves.
+
+const NOTES_MODAL_HTML = `
+  <div class="notes-modal-backdrop" id="notes-modal" hidden role="dialog" aria-modal="true" aria-labelledby="notes-modal-title">
+    <div class="notes-modal-card">
+      <h2 class="notes-modal-title" id="notes-modal-title">Notes</h2>
+      <p class="notes-modal-text">
+        Anyone with the share link sees this under the file, with a Copy button.
+        Leave it empty to remove the notes.
+      </p>
+      <textarea id="notes-modal-input" class="notes-input" rows="10" maxlength="${NOTES_MAX_CHARS}"
+                placeholder="Paste a prompt, a caption, the steps you talked through…"></textarea>
+      <div class="notes-modal-actions">
+        <button type="button" class="notes-modal-cancel" id="notes-modal-cancel">Cancel</button>
+        <button type="button" class="notes-modal-ok" id="notes-modal-ok">Save notes</button>
+      </div>
+    </div>
+  </div>
+`;
+
+const NOTES_MODAL_CSS = `
+  .notes-modal-backdrop {
+    position: fixed; inset: 0; z-index: 9999;
+    background: rgba(15,23,42,0.55);
+    display: flex; align-items: center; justify-content: center;
+    padding: 20px; backdrop-filter: blur(2px);
+    animation: delFade .15s ease-out;
+  }
+  .notes-modal-backdrop[hidden] { display: none; }
+  .notes-modal-card {
+    background: #fff; border-radius: 14px; padding: 22px 22px 18px;
+    max-width: 620px; width: 100%;
+    box-shadow: 0 20px 50px -16px rgba(0,0,0,0.35);
+    animation: delPop .18s cubic-bezier(.18,.7,.25,1.2);
+  }
+  .notes-modal-title { margin: 0 0 6px; font-size: 19px; font-weight: 700; letter-spacing: -0.02em; }
+  .notes-modal-text { margin: 0 0 14px; font-size: 14px; line-height: 1.5; color: #475569; }
+  .notes-modal-card .notes-input { min-height: 220px; }
+  .notes-modal-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+  .notes-modal-actions button {
+    flex: 1 1 140px; min-height: 48px; padding: 12px 16px;
+    border: 0; border-radius: 10px; cursor: pointer;
+    font: inherit; font-size: 15px; font-weight: 600;
+    transition: filter .15s, transform .08s;
+  }
+  .notes-modal-cancel { background: #fff; color: #0f172a; border: 1px solid #e5e7eb; }
+  .notes-modal-cancel:hover { background: #f3f4f6; }
+  .notes-modal-ok {
+    background: linear-gradient(180deg, var(--brand) 0%, var(--brand-dark) 100%); color: #fff;
+    box-shadow: 0 1px 2px rgba(37,99,235,0.22), 0 8px 22px -8px rgba(37,99,235,0.55);
+  }
+  .notes-modal-ok:hover { filter: brightness(1.05); }
+  .notes-modal-ok:active { transform: translateY(1px); }
+`;
+
+const NOTES_MODAL_JS = `
+  (function () {
+    const modal = document.getElementById('notes-modal');
+    const titleEl = document.getElementById('notes-modal-title');
+    const input = document.getElementById('notes-modal-input');
+    const cancel = document.getElementById('notes-modal-cancel');
+    const okBtn = document.getElementById('notes-modal-ok');
+    if (!modal) return;
+
+    let onSave = null;
+
+    function open(opts) {
+      opts = opts || {};
+      titleEl.textContent = opts.title || 'Notes';
+      input.value = opts.value || '';
+      onSave = typeof opts.then === 'function' ? opts.then : null;
+      modal.hidden = false;
+      document.body.style.overflow = 'hidden';
+      input.focus();
+      // Caret at the end, so appending to existing notes needs no extra click.
+      try { input.setSelectionRange(input.value.length, input.value.length); } catch (e) {}
+    }
+    function close() {
+      modal.hidden = true;
+      document.body.style.overflow = '';
+      onSave = null;
+    }
+
+    cancel.addEventListener('click', close);
+    okBtn.addEventListener('click', async () => {
+      const fn = onSave;
+      const text = input.value;
+      close();
+      if (fn) { try { await fn(text); } catch (e) { console.error('[notes-modal] callback error', e); } }
+    });
+    modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !modal.hidden) close();
+      // Enter alone must insert a newline — notes are multi-line — so the
+      // keyboard save is the standard ⌘/Ctrl+Enter.
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && !modal.hidden) okBtn.click();
+    });
+
+    window.__editNotes = open;
+  })();
+`;
+
 // ---------- recent list rendering (per user, used on /upload) ----------
 
 function renderRecentCard(r) {
@@ -531,8 +660,12 @@ function renderRecentCard(r) {
   const title = r.title || r.original_filename || 'File';
   const dlLabel = r.download_allowed ? 'Downloads ON' : 'Downloads OFF';
   const dlClass = r.download_allowed ? 'ok' : 'muted';
+  const notes = (r.notes || '').toString();
+  // The notes body is carried on the card as a data attribute so the Notes
+  // editor opens instantly with the current text — no round-trip, and no
+  // second endpoint to keep in sync with the list.
   return `
-    <div class="card stack recent-item" data-slug="${escHtml(r.slug)}" data-id="${r.id}" data-download="${r.download_allowed ? 1 : 0}">
+    <div class="card stack recent-item" data-slug="${escHtml(r.slug)}" data-id="${r.id}" data-download="${r.download_allowed ? 1 : 0}" data-notes="${escHtml(notes)}">
       <div>
         <div style="font-weight: 600; font-size: 16px; word-break: break-word;" class="recent-title">
           ${kindEmoji(r.kind)} ${escHtml(title)}
@@ -542,6 +675,7 @@ function renderRecentCard(r) {
         </div>
         <div class="muted" style="font-size: 12px; margin-top: 2px;">
           ${escHtml(fmtGstTimestamp(r.created_at))}
+          <span class="notes-badge notes-state"${notes ? '' : ' style="display:none;"'}> · 📝 has notes</span>
         </div>
       </div>
       <div class="link-box recent-link">${escHtml(shareLink)}</div>
@@ -549,6 +683,7 @@ function renderRecentCard(r) {
       <div class="row">
         <a class="btn btn-secondary" href="/f/${escHtml(r.slug)}" target="_blank" rel="noopener">Open</a>
         <button type="button" class="btn btn-secondary rename-btn" data-slug="${escHtml(r.slug)}">Rename</button>
+        <button type="button" class="btn btn-secondary notes-btn" data-slug="${escHtml(r.slug)}">${notes ? 'Edit notes' : 'Add notes'}</button>
         <button type="button" class="btn btn-secondary toggle-dl-btn" data-slug="${escHtml(r.slug)}">Toggle download</button>
         <button type="button" class="btn btn-danger delete-btn" data-slug="${escHtml(r.slug)}" data-title="${escHtml(title)}">Delete</button>
       </div>
@@ -3157,6 +3292,15 @@ app.get('/upload', requireUser, (req, res) => {
           </div>
           <p class="muted" style="font-size: 12px; margin: 6px 0 0;">${escHtml(capsHint)}</p>
         </div>
+        <div>
+          <label for="notes">Notes (optional)</label>
+          <textarea id="notes" name="notes" class="notes-input" rows="4"
+                    maxlength="${NOTES_MAX_CHARS}"
+                    placeholder="Paste a prompt, a caption, the steps you talked through…"></textarea>
+          <p class="muted" style="font-size: 12px; margin: 6px 0 0;">
+            Shown under the file on the share page, with a Copy button — so whoever you send the link to can lift the text.
+          </p>
+        </div>
         <label class="checkbox-row" for="allow_download">
           <input id="allow_download" name="allow_download" type="checkbox" checked>
           <span>Allow viewers to download
@@ -3352,7 +3496,11 @@ app.get('/upload', requireUser, (req, res) => {
           // Clear the file input + dropzone state but keep the Title and
           // "allow download" choice — users often share similar files in
           // batches and shouldn't have to re-check the box each time.
+          // Notes ARE cleared: they describe one specific file, and a stale
+          // prompt silently riding onto the next upload is the worse bug.
           fileInput.value = '';
+          const notesEl = document.getElementById('notes');
+          if (notesEl) notesEl.value = '';
           showFilename();
           errMsg.style.display = 'none';
         }
@@ -3532,6 +3680,28 @@ const RECENT_LIST_JS = `
         } else alert('Rename failed.');
         return;
       }
+      if (btn.classList.contains('notes-btn')) {
+        const item = btn.closest('.recent-item');
+        window.__editNotes({
+          title: 'Notes for this file',
+          value: item.dataset.notes || '',
+          then: async (text) => {
+            const res = await fetch('/api/notes/' + btn.dataset.slug, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ notes: text }),
+              credentials: 'same-origin',
+            });
+            if (!res.ok) { alert('Could not save the notes.'); return; }
+            const data = await res.json();
+            item.dataset.notes = data.notes;
+            btn.textContent = data.notes ? 'Edit notes' : 'Add notes';
+            const badge = item.querySelector('.notes-state');
+            if (badge) badge.style.display = data.notes ? '' : 'none';
+          },
+        });
+        return;
+      }
       if (btn.classList.contains('toggle-dl-btn')) {
         const item = btn.closest('.recent-item');
         const current = item.dataset.download === '1';
@@ -3589,6 +3759,7 @@ app.post('/api/upload', requireUser, upload.single('file'), async (req, res) => 
     const userTitle = (req.body.title || '').toString().trim();
     const fallbackTitle = baseFilename(file.originalname) || 'File';
     const title = (userTitle || fallbackTitle).slice(0, 200);
+    const notes = (req.body.notes || '').toString().slice(0, NOTES_MAX_CHARS);
     const allowDownload = req.body.allow_download === 'on' || req.body.allow_download === 'true' || req.body.allow_download === '1';
 
     const slug = nanoid(8);
@@ -3631,7 +3802,7 @@ app.post('/api/upload', requireUser, upload.single('file'), async (req, res) => 
       slug, title, original_filename: effectiveOriginalName,
       kind: cls.kind, mime_type: cls.mime, size_bytes: uploadSize,
       download_allowed: allowDownload, ghl_url: ghlUrl,
-      user_id: req.user.id,
+      user_id: req.user.id, notes,
     });
 
     if (transcodedTmp) { try { fs.unlinkSync(transcodedTmp); } catch {} }
@@ -4089,6 +4260,7 @@ app.get('/f/:slug', async (req, res) => {
             <p>This text file is too large to preview inline (${fmtBytes(rec.size_bytes)} > ${fmtBytes(SOFT_INLINE_CAP)}).</p>
             ${rec.download_allowed ? `<a class="btn btn-block" href="/d/${rec.slug}" download>⬇ Download to read</a>` : '<p class="muted">Downloads are disabled for this file.</p>'}
           </div>
+          ${viewers.renderNotes(rec.notes)}
         `;
       } else {
         try {
@@ -4107,6 +4279,7 @@ app.get('/f/:slug', async (req, res) => {
         <p class="muted">${escHtml(rec.original_filename)} · ${fmtBytes(rec.size_bytes)}</p>
         <div class="card"><p>This file type does not have a built-in viewer.</p>
         ${rec.download_allowed ? `<a class="btn btn-block" href="/d/${rec.slug}" download>⬇ Download</a>` : '<p class="muted">Downloads are disabled for this file.</p>'}</div>
+        ${viewers.renderNotes(rec.notes)}
       `;
   }
 
@@ -4510,7 +4683,11 @@ const CHAT_NEW_JS = `
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           credentials: 'same-origin',
-          body: JSON.stringify({ title: titleEl.value.trim(), allow_download: !!dlEl.checked }),
+          body: JSON.stringify({
+            title: titleEl.value.trim(),
+            notes: (document.getElementById('chat-notes') || { value: '' }).value,
+            allow_download: !!dlEl.checked,
+          }),
         });
         var d = await res.json();
         if (!res.ok || !d.ok) throw new Error(d.error || 'Could not start the upload.');
@@ -4674,6 +4851,7 @@ const CHAT_EDIT_JS = `
         credentials: 'same-origin',
         body: JSON.stringify({
           title: document.getElementById('chat-title').value.trim(),
+          notes: document.getElementById('chat-notes').value,
           allow_download: !!document.getElementById('chat-dl').checked,
         }),
       });
@@ -5017,6 +5195,13 @@ app.get('/chats/new', requireUser, (req, res) => {
           <p class="muted" style="font-size:12px; margin:2px 0 0;">Number 1 is the top of the scroll — the start of the conversation.</p>
         </div>
 
+        <div>
+          <label for="chat-notes">Notes (optional)</label>
+          <textarea id="chat-notes" class="notes-input" rows="4" maxlength="${NOTES_MAX_CHARS}"
+                    placeholder="Paste the prompt behind this conversation…"></textarea>
+          <p class="muted" style="font-size:12px; margin:6px 0 0;">Shown at the end of the scroll with a Copy button.</p>
+        </div>
+
         <label class="checkbox-row" for="chat-dl">
           <input id="chat-dl" type="checkbox">
           <span>Allow viewers to download the screenshots
@@ -5083,6 +5268,10 @@ app.get('/chats/:slug/edit', requireUser, (req, res) => {
       <div class="card">
         <label for="chat-title">Title</label>
         <input id="chat-title" type="text" value="${escHtml(c.title)}" placeholder="Untitled chat">
+        <label for="chat-notes" style="display:block; margin-top:12px;">Notes (optional)</label>
+        <textarea id="chat-notes" class="notes-input" rows="4" maxlength="${NOTES_MAX_CHARS}"
+                  placeholder="Paste the prompt behind this conversation…">${escHtml(c.notes || '')}</textarea>
+        <p class="muted" style="font-size:12px; margin:6px 0 0;">Shown at the end of the scroll with a Copy button.</p>
         <label class="checkbox-row" for="chat-dl" style="margin-top:12px;">
           <input id="chat-dl" type="checkbox" ${c.download_allowed ? 'checked' : ''}>
           <span>Allow viewers to download the screenshots</span>
@@ -5137,14 +5326,15 @@ app.get('/chats/:slug/edit', requireUser, (req, res) => {
 
 // ---------- chats: write APIs ----------
 
-app.post('/api/chats', requireUser, express.json(), (req, res) => {
+app.post('/api/chats', requireUser, express.json({ limit: '256kb' }), (req, res) => {
   const gate = chatGate(req.user);
   if (!gate.ok) return res.status(403).json({ ok: false, error: gate.reason });
 
   const title = (req.body.title || '').toString().trim().slice(0, 200);
+  const notes = (req.body.notes || '').toString().slice(0, NOTES_MAX_CHARS);
   const allowDownload = req.body.allow_download === true || req.body.allow_download === 'true';
   const slug = nanoid(8);
-  cdb.create({ slug, user_id: req.user.id, title, download_allowed: allowDownload ? 1 : 0 });
+  cdb.create({ slug, user_id: req.user.id, title, notes, download_allowed: allowDownload ? 1 : 0 });
   console.log(`[chat] user=${req.user.id} created draft ${slug}`);
   res.json({ ok: true, slug });
 });
@@ -5228,10 +5418,11 @@ app.post('/api/chats/:slug/reorder', requireUser, express.json({ limit: '100kb' 
   res.json({ ok: true, count: n });
 });
 
-app.post('/api/chats/:slug/settings', requireUser, express.json(), (req, res) => {
+app.post('/api/chats/:slug/settings', requireUser, express.json({ limit: '256kb' }), (req, res) => {
   const c = cdb.getBySlugForUser(req.params.slug, req.user.id);
   if (!c) return res.status(404).json({ ok: false, error: 'Not found.' });
   if (typeof req.body.title === 'string') cdb.setTitle(c.id, req.body.title.trim());
+  if (typeof req.body.notes === 'string') cdb.setNotes(c.id, req.body.notes.slice(0, NOTES_MAX_CHARS));
   if (typeof req.body.allow_download === 'boolean') cdb.setDownload(c.id, req.body.allow_download);
   res.json({ ok: true });
 });
@@ -5332,6 +5523,7 @@ app.get('/c/:slug', (req, res) => {
         <p class="muted" style="margin:0; font-size:13px;">${items.length} screenshot${items.length === 1 ? '' : 's'} · scroll to read it all</p>
       </div>
       <div class="chat-scroll" id="chat-scroll">${shots}</div>
+      ${c.notes ? `<div style="padding: 16px 18px 0;">${viewers.renderNotes(c.notes)}</div>` : ''}
       <div class="chat-foot">
         <p class="muted" style="font-size:13px; margin:0;">End of the conversation · shared from ${escHtml(SITE_NAME)}</p>
       </div>
@@ -5378,6 +5570,16 @@ app.post('/api/rename/:slug', requireUser, express.json(), (req, res) => {
   const changed = fdb.updateTitle(req.params.slug, req.user.id, title.slice(0, 200));
   if (!changed) return res.status(404).json({ ok: false, error: 'not found' });
   res.json({ ok: true, title });
+});
+
+// Notes save. An empty body is a valid save — it's how you remove notes —
+// so unlike rename there is no "required" check. The JSON limit has to
+// clear NOTES_MAX_CHARS with room for multi-byte characters.
+app.post('/api/notes/:slug', requireUser, express.json({ limit: '256kb' }), (req, res) => {
+  const notes = (req.body && req.body.notes != null ? req.body.notes : '').toString().slice(0, NOTES_MAX_CHARS);
+  const changed = fdb.updateNotes(req.params.slug, req.user.id, notes);
+  if (!changed) return res.status(404).json({ ok: false, error: 'not found' });
+  res.json({ ok: true, notes });
 });
 
 app.post('/api/toggle-download/:slug', requireUser, express.json(), (req, res) => {
@@ -5755,7 +5957,7 @@ app.get('/support', (req, res) => {
 // in a separate file so the diff against server.js stays tiny. The web UI
 // and existing /api/* routes are untouched.
 apiV1.attach(app, {
-  db: { users: udb, files: fdb, passwordResets: prdb, magicLinks: mldb, messages: mdb, groups: gdb, feed: feeddb, chats: cdb, apiTokens: atdb, deviceTokens: dtdb },
+  db: { users: udb, files: fdb, passwordResets: prdb, magicLinks: mldb, messages: mdb, groups: gdb, feed: feeddb, chats: cdb, apiTokens: atdb, deviceTokens: dtdb, NOTES_MAX_CHARS },
   users,
   ghl,
   transcode,
