@@ -385,7 +385,7 @@ function layout({ title, body, user, ogTitle, ogDescription, ogImageUrl, noindex
   <title>${escHtml(title)}</title>
   ${noindex ? '<meta name="robots" content="noindex,nofollow">' : ''}
   ${og}
-  <style>${BASE_CSS}${DEL_MODAL_CSS}${NOTES_MODAL_CSS}${CHAT_CSS}</style>
+  <style>${BASE_CSS}${DEL_MODAL_CSS}${NOTES_MODAL_CSS}${CHAT_CSS}${REORDER_CSS}</style>
 </head>
 <body>
   <header class="site-header">
@@ -653,6 +653,218 @@ const NOTES_MODAL_JS = `
   })();
 `;
 
+// ============================================================================
+// Drag-to-reorder — shared by the file list (/upload) and the chat-scroll
+// list (/chats).
+//
+// Two ways to move a card, because one is never enough on a phone:
+//   1. Drag it. On a mouse that's an ordinary press-and-drag anywhere on the
+//      card; on a touchscreen it's a ~180ms press first, so a normal flick
+//      still scrolls the page instead of picking a card up.
+//   2. Tap the ↑ / ↓ buttons in the card's grip bar. Same endpoint, so a
+//      shaky finger never has to land a drag at all.
+// Buttons and links inside a card are excluded from the drag, so "Copy link"
+// still copies.
+// ============================================================================
+
+const REORDER_CSS = `
+  .reorder-bar {
+    display: flex; align-items: center; gap: 6px;
+    margin: -20px -20px 14px; padding: 4px 8px 4px 4px;
+    background: #f8fafc; border-bottom: 1px solid var(--border);
+    border-radius: 12px 12px 0 0;
+    cursor: grab; user-select: none; -webkit-user-select: none;
+  }
+  .reorder-bar:active { cursor: grabbing; }
+  .stack > .reorder-bar + * { margin-top: 0; }
+  .reorder-grip {
+    flex: 0 0 auto; width: 40px; height: 40px;
+    display: inline-flex; align-items: center; justify-content: center;
+    color: #94a3b8; font-size: 17px; line-height: 1;
+  }
+  .reorder-hint { flex: 1 1 auto; font-size: 12px; color: var(--muted); min-width: 0;
+                  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .reorder-btn {
+    flex: 0 0 auto; width: 40px; height: 40px; border-radius: 9px;
+    border: 1px solid var(--border); background: #fff; color: #475569;
+    font-size: 16px; line-height: 1; cursor: pointer;
+    display: inline-flex; align-items: center; justify-content: center;
+    transition: background .12s, transform .08s;
+  }
+  .reorder-btn:hover { background: #f1f5f9; color: #0f172a; }
+  .reorder-btn:active { transform: scale(0.92); }
+  .reorder-btn:disabled { opacity: 0.3; cursor: not-allowed; transform: none; }
+
+  /* Whole card is the drag surface, so the finger doesn't have to find the
+     grip. pan-y keeps vertical scrolling native until the press delay fires. */
+  .reorder-item { touch-action: pan-y; }
+  .reorder-item.sortable-ghost { opacity: 0.28; }
+  .reorder-item.sortable-chosen .reorder-bar { background: #eef2ff; }
+  .reorder-item.sortable-drag  { box-shadow: 0 18px 40px -12px rgba(15,23,42,0.45); }
+
+  .reorder-toast {
+    position: fixed; left: 50%; bottom: 22px; transform: translate(-50%, 14px);
+    background: rgba(15,23,42,0.92); color: #fff; font-size: 14px; font-weight: 600;
+    padding: 10px 16px; border-radius: 99px; z-index: 9998;
+    opacity: 0; pointer-events: none; transition: opacity .18s, transform .18s;
+  }
+  .reorder-toast.on { opacity: 1; transform: translate(-50%, 0); }
+  .reorder-toast.err { background: #b91c1c; }
+
+  @media (max-width: 480px) {
+    .reorder-hint { display: none; }
+  }
+`;
+
+// The grip bar markup, rendered as the first child of a reorderable card.
+function reorderBar(hint) {
+  return `
+    <div class="reorder-bar">
+      <span class="reorder-grip" aria-hidden="true">⠿</span>
+      <span class="reorder-hint">${escHtml(hint || 'Drag to reorder')}</span>
+      <button type="button" class="reorder-btn reorder-up" aria-label="Move up" title="Move up">↑</button>
+      <button type="button" class="reorder-btn reorder-down" aria-label="Move down" title="Move down">↓</button>
+    </div>
+  `;
+}
+
+const REORDER_JS = `
+  (function () {
+    if (window.__initReorder) return;
+
+    var toastEl = null;
+    var toastTimer = null;
+    function toast(msg, isErr) {
+      if (!toastEl) {
+        toastEl = document.createElement('div');
+        toastEl.className = 'reorder-toast';
+        document.body.appendChild(toastEl);
+      }
+      toastEl.textContent = msg;
+      toastEl.className = 'reorder-toast on' + (isErr ? ' err' : '');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(function () {
+        toastEl.className = 'reorder-toast' + (isErr ? ' err' : '');
+      }, isErr ? 3200 : 1400);
+    }
+
+    function whenSortable(fn, tries) {
+      if (typeof Sortable !== 'undefined') return fn();
+      if ((tries || 0) > 60) return;
+      setTimeout(function () { whenSortable(fn, (tries || 0) + 1); }, 50);
+    }
+
+    /**
+     * opts: { container, itemSelector, endpoint, hint }
+     * Returns { refresh } so a list that re-renders itself (filters,
+     * infinite scroll) can re-sync the arrow buttons.
+     */
+    window.__initReorder = function (opts) {
+      var box = typeof opts.container === 'string'
+        ? document.querySelector(opts.container) : opts.container;
+      if (!box) return { refresh: function () {} };
+
+      var sel = opts.itemSelector;
+
+      function items() {
+        return Array.prototype.slice.call(box.querySelectorAll(':scope > ' + sel));
+      }
+
+      // Grey out ↑ on the first card and ↓ on the last, so the ends of the
+      // list are obvious instead of silently doing nothing.
+      function refresh() {
+        var rows = items();
+        rows.forEach(function (row, i) {
+          var up = row.querySelector('.reorder-up');
+          var down = row.querySelector('.reorder-down');
+          if (up) up.disabled = (i === 0);
+          if (down) down.disabled = (i === rows.length - 1);
+        });
+      }
+
+      var saving = false;
+      async function save() {
+        var slugs = items().map(function (r) { return r.dataset.slug; })
+                           .filter(function (x) { return !!x; });
+        if (slugs.length < 2 || saving) return;
+        saving = true;
+        try {
+          var res = await fetch(opts.endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ slugs: slugs }),
+            credentials: 'same-origin',
+          });
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          toast('Order saved');
+        } catch (err) {
+          toast('Could not save the new order — reload and try again.', true);
+          console.error('[reorder]', err);
+        } finally {
+          saving = false;
+        }
+      }
+
+      whenSortable(function () {
+        if (box.__reorderBound) return;
+        box.__reorderBound = true;
+        Sortable.create(box, {
+          animation: 170,
+          draggable: sel,
+          // Anything a tap should still activate stays out of the drag.
+          filter: 'button, a, input, textarea, select, label, .link-box, .filter-bar',
+          preventOnFilter: false,
+          // Mouse: drag starts immediately. Finger: hold ~180ms first, and
+          // bail out to a normal page scroll if the finger travels before
+          // then — otherwise the list becomes impossible to scroll.
+          delay: 180,
+          delayOnTouchOnly: true,
+          touchStartThreshold: 8,
+          forceFallback: true,
+          fallbackOnBody: true,
+          fallbackTolerance: 4,
+          ghostClass: 'sortable-ghost',
+          chosenClass: 'sortable-chosen',
+          dragClass: 'sortable-drag',
+          scroll: true,
+          scrollSensitivity: 90,
+          scrollSpeed: 12,
+          bubbleScroll: true,
+          onEnd: function (evt) {
+            refresh();
+            if (evt.oldIndex === evt.newIndex) return;
+            save();
+          },
+        });
+      });
+
+      box.addEventListener('click', function (e) {
+        var btn = e.target.closest('.reorder-up, .reorder-down');
+        if (!btn || btn.disabled) return;
+        var row = btn.closest(sel);
+        if (!row || row.parentElement !== box) return;
+        if (btn.classList.contains('reorder-up')) {
+          var prev = row.previousElementSibling;
+          while (prev && !prev.matches(sel)) prev = prev.previousElementSibling;
+          if (!prev) return;
+          box.insertBefore(row, prev);
+        } else {
+          var next = row.nextElementSibling;
+          while (next && !next.matches(sel)) next = next.nextElementSibling;
+          if (!next) return;
+          box.insertBefore(next, row);
+        }
+        row.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+        refresh();
+        save();
+      });
+
+      refresh();
+      return { refresh: refresh };
+    };
+  })();
+`;
+
 // ---------- recent list rendering (per user, used on /upload) ----------
 
 function renderRecentCard(r) {
@@ -665,7 +877,8 @@ function renderRecentCard(r) {
   // editor opens instantly with the current text — no round-trip, and no
   // second endpoint to keep in sync with the list.
   return `
-    <div class="card stack recent-item" data-slug="${escHtml(r.slug)}" data-id="${r.id}" data-download="${r.download_allowed ? 1 : 0}" data-notes="${escHtml(notes)}">
+    <div class="card stack recent-item reorder-item" data-slug="${escHtml(r.slug)}" data-id="${r.id}" data-download="${r.download_allowed ? 1 : 0}" data-notes="${escHtml(notes)}">
+      ${reorderBar('Drag to reorder')}
       <div>
         <div style="font-weight: 600; font-size: 16px; word-break: break-word;" class="recent-title">
           ${kindEmoji(r.kind)} ${escHtml(title)}
@@ -3211,7 +3424,7 @@ app.get('/upload', requireUser, (req, res) => {
 
   const firstPage = fdb.listRecentByUser(req.user.id, { limit: RECENT_PAGE_SIZE });
   const nextCursor = firstPage.length === RECENT_PAGE_SIZE
-    ? firstPage[firstPage.length - 1].id : null;
+    ? firstPage[firstPage.length - 1].sort_order : null;
 
   // Always render the recent-list scaffolding — heading, filter bar, list
   // container, sentinel. That way the RECENT_LIST_JS IIFE always binds its
@@ -3239,13 +3452,15 @@ app.get('/upload', requireUser, (req, res) => {
         <button type="button" class="btn btn-secondary btn-sm" id="filter-reset">Clear</button>
       </div>
     </div>
-    <div id="recent-list">${firstPage.map(renderRecentCard).join('')}</div>
+    <div id="recent-list" class="reorder-list">${firstPage.map(renderRecentCard).join('')}</div>
     <div id="recent-sentinel"
          data-cursor="${nextCursor != null ? nextCursor : ''}"
          class="muted"
          style="text-align: center; padding: 16px;${nextCursor == null ? 'display:none;' : ''}">
       Loading more…
     </div>
+    <script src="/vendor/sortable.min.js" defer></script>
+    <script>${REORDER_JS}</script>
     <script>${RECENT_LIST_JS}</script>
   `;
 
@@ -3527,6 +3742,14 @@ const RECENT_LIST_JS = `
 
     const PAGE_SIZE = ${RECENT_PAGE_SIZE};
     const filters = { kind: 'all', q: '', from: '', to: '' };
+    // Drag-to-reorder. Sortable is bound to the container, not the cards,
+    // so it survives every innerHTML swap below — only the arrow-button
+    // enabled state has to be re-synced after a re-render.
+    const reorder = window.__initReorder({
+      container: list,
+      itemSelector: '.recent-item',
+      endpoint: '/api/recent/reorder',
+    });
     let loading = false;
     let debounceTimer = null;
     let io = null;
@@ -3577,6 +3800,7 @@ const RECENT_LIST_JS = `
             + '</div>';
         }
         setSentinelActive(data.nextCursor);
+        reorder.refresh();
       } catch (err) {
         list.innerHTML = '<p class="err">Could not load. Please try again.</p>';
       } finally {
@@ -3592,7 +3816,7 @@ const RECENT_LIST_JS = `
         const res = await fetch('/api/recent?' + buildQs({ before: sentinel.dataset.cursor }), { credentials: 'same-origin' });
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
-        if (data.html) list.insertAdjacentHTML('beforeend', data.html);
+        if (data.html) { list.insertAdjacentHTML('beforeend', data.html); reorder.refresh(); }
         if (data.nextCursor == null) {
           sentinel.style.display = 'none';
         } else {
@@ -3725,7 +3949,7 @@ const RECENT_LIST_JS = `
           then: async () => {
             btn.disabled = true; btn.textContent = 'Deleting…';
             const res = await fetch('/api/delete/' + btn.dataset.slug, { method: 'POST', credentials: 'same-origin' });
-            if (res.ok) btn.closest('.recent-item').remove();
+            if (res.ok) { btn.closest('.recent-item').remove(); reorder.refresh(); }
             else { btn.disabled = false; btn.textContent = 'Delete'; alert('Delete failed.'); }
           }
         });
@@ -4314,9 +4538,12 @@ const CHAT_CSS = `
   }
   .shot-list li.shot.sortable-ghost { opacity: 0.35; }
   .shot-list li.shot.sortable-chosen { box-shadow: 0 6px 20px -6px rgba(0,0,0,0.25); }
+  /* A full 40x44 target — the old 26x34 grip was hard to hit with a thumb. */
   .shot-handle {
-    flex: 0 0 auto; cursor: grab; color: #94a3b8; font-size: 18px; line-height: 1;
-    padding: 8px 4px; touch-action: none; user-select: none;
+    flex: 0 0 auto; cursor: grab; color: #94a3b8; font-size: 19px; line-height: 1;
+    width: 40px; height: 44px; margin: -4px 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    touch-action: none; user-select: none; -webkit-user-select: none;
   }
   .shot-handle:active { cursor: grabbing; }
   .shot-num {
@@ -4348,8 +4575,10 @@ const CHAT_CSS = `
   .chat-progress-fill { height: 100%; width: 0%; background: var(--brand); transition: width .2s ease; }
   .chat-progress-text { font-size: 13px; color: var(--muted); margin-top: 6px; }
 
-  /* ----- the chat card on /chats ----- */
-  .chat-card { display: flex; gap: 12px; align-items: flex-start; }
+  /* ----- the chat card on /chats -----
+     The card itself is now a plain block so the drag grip bar can sit above
+     the row; .chat-card-inner keeps the old strip + body flex layout. */
+  .chat-card-inner { display: flex; gap: 12px; align-items: flex-start; }
   .chat-strip { flex: 0 0 auto; display: flex; gap: 3px; }
   .chat-strip img { width: 34px; height: 46px; object-fit: cover; object-position: top; border-radius: 5px; border: 1px solid var(--border); background: #f1f5f9; }
   .chat-card-body { flex: 1 1 auto; min-width: 0; }
@@ -5094,18 +5323,21 @@ app.get('/chats', requireUser, (req, res) => {
     ).join('');
     const link = `${PUBLIC_ORIGIN}/c/${c.slug}`;
     return `
-      <div class="card chat-card" data-slug="${escHtml(c.slug)}">
-        <div class="chat-strip">${strip}</div>
-        <div class="chat-card-body">
-          <div style="font-weight:600; margin-bottom:2px;">💬 ${escHtml(c.title || 'Untitled chat')}</div>
-          <div class="muted" style="font-size:13px; margin-bottom:8px;">
-            ${c.item_count} screenshot${c.item_count === 1 ? '' : 's'}${c.download_allowed ? ' · downloads on' : ''}
-            ${fmtGstTimestamp(c.created_at) ? ' · ' + escHtml(fmtGstTimestamp(c.created_at)) : ''}
-          </div>
-          <div class="row">
-            <button type="button" class="btn btn-secondary chat-copy" data-url="${escHtml(link)}">Copy link</button>
-            <a class="btn btn-secondary" href="/c/${escHtml(c.slug)}" target="_blank" rel="noopener">Open</a>
-            <a class="btn btn-secondary" href="/chats/${escHtml(c.slug)}/edit">Edit</a>
+      <div class="card chat-card reorder-item" data-slug="${escHtml(c.slug)}">
+        ${reorderBar('Drag to reorder')}
+        <div class="chat-card-inner">
+          <div class="chat-strip">${strip}</div>
+          <div class="chat-card-body">
+            <div style="font-weight:600; margin-bottom:2px;">💬 ${escHtml(c.title || 'Untitled chat')}</div>
+            <div class="muted" style="font-size:13px; margin-bottom:8px;">
+              ${c.item_count} screenshot${c.item_count === 1 ? '' : 's'}${c.download_allowed ? ' · downloads on' : ''}
+              ${fmtGstTimestamp(c.created_at) ? ' · ' + escHtml(fmtGstTimestamp(c.created_at)) : ''}
+            </div>
+            <div class="row">
+              <button type="button" class="btn btn-secondary chat-copy" data-url="${escHtml(link)}">Copy link</button>
+              <a class="btn btn-secondary" href="/c/${escHtml(c.slug)}" target="_blank" rel="noopener">Open</a>
+              <a class="btn btn-secondary" href="/chats/${escHtml(c.slug)}/edit">Edit</a>
+            </div>
           </div>
         </div>
       </div>
@@ -5121,8 +5353,18 @@ app.get('/chats', requireUser, (req, res) => {
       ${gate.ok
         ? `<a class="btn btn-block" href="/chats/new">➕ New chat scroll</a>`
         : `<div class="card" style="border-left:4px solid #f59e0b;"><strong>Starter account is full</strong><p class="muted" style="margin:6px 0 0; font-size:14px;">${escHtml(gate.reason)}</p></div>`}
-      ${rows.length ? cards : `<div class="recent-empty">No chat scrolls yet. Create one and the link will show up here.</div>`}
+      ${rows.length
+        ? `<div id="chat-list" class="reorder-list">${cards}</div>`
+        : `<div class="recent-empty">No chat scrolls yet. Create one and the link will show up here.</div>`}
+      <script src="/vendor/sortable.min.js" defer></script>
+      <script>${REORDER_JS}</script>
       <script>
+        window.__initReorder({
+          container: '#chat-list',
+          itemSelector: '.chat-card',
+          endpoint: '/api/chats/reorder-list',
+        });
+
         document.addEventListener('click', async function (e) {
           var btn = e.target.closest('.chat-copy');
           if (!btn) return;
@@ -5410,6 +5652,14 @@ app.post('/api/chats/:slug/finalize', requireUser, (req, res) => {
   res.json({ ok: true, slug: c.slug, shareLink, count });
 });
 
+// Reorder the chat-scroll CARDS on /chats (not the screenshots inside one —
+// that's /api/chats/:slug/reorder below). Body: { slugs: [...] } top-to-bottom.
+app.post('/api/chats/reorder-list', requireUser, express.json({ limit: '200kb' }), (req, res) => {
+  const slugs = Array.isArray(req.body && req.body.slugs) ? req.body.slugs : null;
+  if (!slugs) return res.status(400).json({ ok: false, error: 'slugs required' });
+  res.json(cdb.reorderForUser(req.user.id, slugs));
+});
+
 app.post('/api/chats/:slug/reorder', requireUser, express.json({ limit: '100kb' }), (req, res) => {
   const c = cdb.getBySlugForUser(req.params.slug, req.user.id);
   if (!c) return res.status(404).json({ ok: false, error: 'Not found.' });
@@ -5560,8 +5810,17 @@ app.get('/api/recent', requireUser, (req, res) => {
     limit,
     kind, q, from, to,
   });
-  const nextCursor = rows.length === limit ? rows[rows.length - 1].id : null;
+  const nextCursor = rows.length === limit ? rows[rows.length - 1].sort_order : null;
   res.json({ html: rows.map(renderRecentCard).join(''), nextCursor });
+});
+
+// Save a drag-and-drop (or ↑/↓) reorder of the file list. Body:
+// { slugs: ["a","b",...] } in the desired top-to-bottom order.
+app.post('/api/recent/reorder', requireUser, express.json({ limit: '200kb' }), (req, res) => {
+  const slugs = Array.isArray(req.body && req.body.slugs) ? req.body.slugs : null;
+  if (!slugs) return res.status(400).json({ ok: false, error: 'slugs required' });
+  const result = fdb.reorderForUser(req.user.id, slugs);
+  res.json(result);
 });
 
 app.post('/api/rename/:slug', requireUser, express.json(), (req, res) => {
