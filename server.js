@@ -2791,6 +2791,316 @@ function buildSuggestions(hits, groupHits) {
   return out;
 }
 
+const PUBLIC_GROUP_CSS = `
+  :root { --pub-fg:#0f172a; --pub-muted:#64748b; --pub-bg:#f6f7fb; --pub-border:#e5e7eb; --pub-brand:#2563eb; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  .pub-body {
+    font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: var(--pub-bg); color: var(--pub-fg);
+    min-height: 100vh; padding: 0 0 40px;
+    -webkit-text-size-adjust: 100%;
+  }
+  .pub-wrap { max-width: 680px; margin: 0 auto; padding: 26px 16px 0; }
+
+  .pub-head { text-align: center; margin-bottom: 20px; }
+  .pub-pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 4px 11px; border-radius: 99px;
+    background: #0d9488; color: #fff;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  }
+  .pub-title {
+    margin: 12px 0 4px; font-size: 30px; line-height: 1.15; font-weight: 800;
+    letter-spacing: -0.02em; word-break: break-word;
+  }
+  .pub-sub { margin: 0; font-size: 14px; color: var(--pub-muted); }
+
+  /* Two columns, same as the folder looks in the app. Very narrow phones
+     drop to one so a long prompt title is still readable. */
+  .pub-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+  @media (max-width: 419px) { .pub-grid { grid-template-columns: 1fr; } }
+
+  .pub-card {
+    display: flex; flex-direction: column;
+    border: 1px solid transparent; border-radius: 14px; padding: 12px;
+    background: #fff;
+  }
+  .pub-card.pub-orange { background: #fff7ed; border-color: #fed7aa; }
+  .pub-card.pub-teal   { background: #f0fdfa; border-color: #99f6e4; }
+
+  /* The whole upper half of a card is the "read it" button — a big target,
+     and it keeps the Copy button underneath free of accidental taps. */
+  .pub-read {
+    display: block; width: 100%; text-align: left;
+    background: none; border: 0; padding: 0; margin: 0 0 10px; cursor: pointer; font: inherit;
+    flex: 1 1 auto;
+  }
+  .pub-card-title { margin: 0 0 4px; font-size: 15px; font-weight: 700; line-height: 1.3; color: var(--pub-fg); word-break: break-word; }
+  .pub-card-preview { margin: 0 0 6px; font-size: 12.5px; line-height: 1.45; color: #475569; }
+  .pub-card-more { font-size: 11.5px; font-weight: 600; color: var(--pub-brand); }
+
+  .pub-copy {
+    width: 100%; min-height: 46px; padding: 11px 14px;
+    display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+    border: 0; border-radius: 11px; cursor: pointer;
+    font: inherit; font-size: 15px; font-weight: 700; color: #fff;
+    background: #14b8a6;
+  }
+  .pub-orange .pub-copy { background: #f97316; }
+  .pub-copy:active { transform: translateY(1px); }
+  .pub-copy.is-copied { background: #16a34a; }
+
+  .pub-empty { text-align: center; color: var(--pub-muted); padding: 40px 20px; font-size: 14px; }
+
+  .pub-foot { margin-top: 30px; text-align: center; }
+  .pub-credit { margin: 14px 0 0; font-size: 12.5px; color: var(--pub-muted); }
+  .pub-credit a { color: var(--pub-muted); }
+
+  /* Reading one note in full. A sheet on a phone, a centred card on a desktop. */
+  .pub-sheet-backdrop { position: fixed; inset: 0; background: rgba(15,23,42,0.5); z-index: 90; }
+  .pub-sheet-backdrop[hidden] { display: none; }
+  .pub-sheet {
+    position: fixed; z-index: 100; left: 50%; transform: translateX(-50%);
+    bottom: 0; width: min(640px, 100%);
+    background: #fff; border-radius: 16px 16px 0 0;
+    display: flex; flex-direction: column; max-height: 86vh;
+    box-shadow: 0 -10px 40px rgba(15,23,42,0.3);
+    animation: pubUp .16s ease-out;
+  }
+  .pub-sheet[hidden] { display: none; }
+  @keyframes pubUp { from { transform: translate(-50%, 14px); opacity: 0; } to { transform: translate(-50%, 0); opacity: 1; } }
+  @media (min-width: 700px) {
+    .pub-sheet { bottom: auto; top: 50%; transform: translate(-50%, -50%); border-radius: 16px; }
+    @keyframes pubUp { from { opacity: 0; } to { opacity: 1; } }
+  }
+  .pub-sheet-head { display: flex; align-items: flex-start; gap: 10px; padding: 14px 16px 10px; border-bottom: 1px solid #f1f5f9; }
+  .pub-sheet-title { margin: 0; flex: 1; font-size: 17px; font-weight: 700; line-height: 1.3; word-break: break-word; }
+  .pub-sheet-close { width: 30px; height: 30px; border: 0; border-radius: 50%; background: #f1f5f9; color: #475569; cursor: pointer; font-size: 14px; }
+  .pub-sheet-body {
+    margin: 0; padding: 14px 16px; overflow: auto; flex: 1 1 auto;
+    font: 14px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: pre-wrap; word-break: break-word; color: #1e293b;
+    overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
+  }
+  .pub-sheet-foot { padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); border-top: 1px solid #f1f5f9; background: #f8fafc; }
+  .pub-sheet-copy {
+    width: 100%; min-height: 50px; border: 0; border-radius: 12px;
+    background: var(--pub-brand); color: #fff; font: inherit; font-size: 16px; font-weight: 700; cursor: pointer;
+  }
+  .pub-sheet-copy.is-copied { background: #16a34a; }
+
+  .pub-toast {
+    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+    z-index: 200; padding: 10px 18px; border-radius: 99px;
+    background: #0f172a; color: #fff; font-size: 14px; font-weight: 600;
+    box-shadow: 0 10px 30px rgba(15,23,42,0.35);
+  }
+  .pub-toast[hidden] { display: none; }
+`;
+
+const PUBLIC_GROUP_JS = `
+  (function () {
+    var sheet = document.getElementById('pub-sheet');
+    var backdrop = document.getElementById('pub-backdrop');
+    var sheetTitle = document.getElementById('pub-sheet-title');
+    var sheetBody = document.getElementById('pub-sheet-body');
+    var sheetCopy = document.getElementById('pub-sheet-copy');
+    var toastEl = document.getElementById('pub-toast');
+    var toastTimer = null;
+    var openBody = '';
+
+    function toast(msg) {
+      toastEl.textContent = msg;
+      toastEl.hidden = false;
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(function () { toastEl.hidden = true; }, 1400);
+    }
+
+    // Visitors arrive in whatever browser their messaging app embeds, and
+    // some of those have no clipboard API. The textarea route is ugly but it
+    // is the difference between the page working and the page being useless.
+    async function copyText(text) {
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+          return true;
+        }
+      } catch (e) {}
+      try {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.top = '-1000px';
+        document.body.appendChild(ta);
+        ta.select();
+        ta.setSelectionRange(0, ta.value.length);
+        var done = document.execCommand('copy');
+        document.body.removeChild(ta);
+        return done;
+      } catch (e) { return false; }
+    }
+
+    function bodyOf(card) {
+      var btn = card.querySelector('.pub-copy');
+      try { return JSON.parse(btn.dataset.body); } catch (e) { return ''; }
+    }
+
+    document.addEventListener('click', async function (e) {
+      var copyBtn = e.target.closest('.pub-copy');
+      if (copyBtn) {
+        var card = copyBtn.closest('.pub-card');
+        var okCopy = await copyText(bodyOf(card));
+        if (okCopy) {
+          copyBtn.classList.add('is-copied');
+          var original = copyBtn.innerHTML;
+          copyBtn.textContent = '✓ Copied';
+          toast('Copied — paste it anywhere');
+          if (navigator.vibrate) { try { navigator.vibrate(12); } catch (err) {} }
+          setTimeout(function () {
+            copyBtn.classList.remove('is-copied');
+            copyBtn.innerHTML = original;
+          }, 1600);
+        } else {
+          toast('Copy failed — open the note and copy by hand');
+        }
+        return;
+      }
+
+      var read = e.target.closest('.pub-read');
+      if (read) {
+        var c = read.closest('.pub-card');
+        openBody = bodyOf(c);
+        sheetTitle.textContent = (c.querySelector('.pub-card-title') || {}).textContent || '';
+        sheetBody.textContent = openBody;
+        sheetBody.scrollTop = 0;
+        sheetCopy.classList.remove('is-copied');
+        sheetCopy.textContent = '📋 Copy this note';
+        sheet.hidden = false;
+        backdrop.hidden = false;
+        document.body.style.overflow = 'hidden';
+        return;
+      }
+    });
+
+    function close() {
+      sheet.hidden = true;
+      backdrop.hidden = true;
+      document.body.style.overflow = '';
+    }
+    backdrop.addEventListener('click', close);
+    document.getElementById('pub-sheet-close').addEventListener('click', close);
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !sheet.hidden) close(); });
+
+    sheetCopy.addEventListener('click', async function () {
+      var okCopy = await copyText(openBody);
+      if (okCopy) {
+        sheetCopy.classList.add('is-copied');
+        sheetCopy.textContent = '✓ Copied';
+        toast('Copied — paste it anywhere');
+      } else {
+        toast('Copy failed — select the text above');
+      }
+    });
+  })();
+`;
+
+// ---------- the public page for a folder ----------
+//
+// A folder of prompts is worth more to the person you send it to than a
+// wall of pasted text: they can keep the link, come back, and take one
+// prompt at a time. So every folder already has a shareable page at
+// /g/<slug> — same trust model as /f/ and /m/, where holding the random
+// link is the permission.
+//
+// It deliberately looks like the folder does in the app: the same
+// two-column checkerboard cards with a Copy button on each. The visitor
+// needs no account, and tapping a card opens the whole note, because
+// deciding whether a prompt is the one you want takes more than two lines.
+
+function renderPublicGroupPage(g, items, publicOrigin) {
+  const title = g.title || 'Shared folder';
+  const count = items.length;
+  const cards = items.map((m, i) => {
+    const col = i % 2;
+    const row = Math.floor(i / 2);
+    const themeClass = (col + row) % 2 === 0 ? 'pub-orange' : 'pub-teal';
+    const firstLine = (m.body || '').toString().split('\n').find(x => x.trim()) || '';
+    const preview = firstLine.length > 90 ? firstLine.slice(0, 90).trimEnd() + '…' : firstLine;
+    return `
+      <article class="pub-card ${themeClass}" data-slug="${escHtml(m.slug)}">
+        <button type="button" class="pub-read" aria-label="Read this note">
+          <h2 class="pub-card-title">${escHtml(m.title || '(untitled)')}</h2>
+          <p class="pub-card-preview">${escHtml(preview)}</p>
+          <span class="pub-card-more">Tap to read it all →</span>
+        </button>
+        <button type="button" class="pub-copy" data-body='${escHtml(JSON.stringify(m.body))}'>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+          Copy
+        </button>
+      </article>
+    `;
+  }).join('');
+
+  const ogDesc = count === 1
+    ? '1 note you can copy and use.'
+    : `${count} notes you can copy and use.`;
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>${escHtml(title)} — ${escHtml(SITE_NAME)}</title>
+  <meta name="robots" content="noindex,nofollow">
+  <meta property="og:site_name" content="${escHtml(SITE_NAME)}">
+  <meta property="og:title" content="${escHtml(title)}">
+  <meta property="og:description" content="${escHtml(ogDesc)}">
+  <meta name="twitter:card" content="summary">
+  <meta name="twitter:title" content="${escHtml(title)}">
+  <meta name="twitter:description" content="${escHtml(ogDesc)}">
+  <style>${PUBLIC_GROUP_CSS}${APPSTORE_CSS}</style>
+</head>
+<body class="pub-body">
+  <main class="pub-wrap">
+    <header class="pub-head">
+      <span class="pub-pill">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+        Shared folder
+      </span>
+      <h1 class="pub-title">${escHtml(title)}</h1>
+      <p class="pub-sub">${count} ${count === 1 ? 'note' : 'notes'} · tap Copy to use one</p>
+    </header>
+
+    ${count === 0
+      ? `<div class="pub-empty">This folder is empty right now.</div>`
+      : `<div class="pub-grid">${cards}</div>`}
+
+    <footer class="pub-foot">
+      ${appStoreCta({ text: 'Keep your own prompts like this — ShareZPresso on iPhone.' })}
+      <p class="pub-credit">Shared with <a href="/" target="_blank" rel="noopener">${escHtml(SITE_NAME)}</a></p>
+    </footer>
+  </main>
+
+  <div class="pub-sheet-backdrop" id="pub-backdrop" hidden></div>
+  <div class="pub-sheet" id="pub-sheet" hidden role="dialog" aria-modal="true" aria-labelledby="pub-sheet-title">
+    <div class="pub-sheet-head">
+      <h2 class="pub-sheet-title" id="pub-sheet-title"></h2>
+      <button type="button" class="pub-sheet-close" id="pub-sheet-close" aria-label="Close">✕</button>
+    </div>
+    <pre class="pub-sheet-body" id="pub-sheet-body"></pre>
+    <div class="pub-sheet-foot">
+      <button type="button" class="pub-sheet-copy" id="pub-sheet-copy">📋 Copy this note</button>
+    </div>
+  </div>
+
+  <div class="pub-toast" id="pub-toast" hidden>Copied</div>
+  <script>${PUBLIC_GROUP_JS}</script>
+</body>
+</html>`;
+}
+
 function renderGroupCard(g, children, publicOrigin) {
   const tiles = children.map((m, i) => {
     // Checkerboard pattern: alternate by (col + row), not just by i.
@@ -2837,6 +3147,10 @@ function renderGroupCard(g, children, publicOrigin) {
         <a href="/messages/new?group=${escHtml(g.slug)}" class="grp-add">＋ Add message to this group</a>
       </div>
       <div class="grp-foot">
+        <button type="button" class="btn btn-secondary btn-sm grp-share-btn"
+                data-url="${escHtml(publicOrigin)}/g/${escHtml(g.slug)}">🔗 Copy share link</button>
+        <a href="${escHtml(publicOrigin)}/g/${escHtml(g.slug)}" target="_blank" rel="noopener"
+           class="btn btn-secondary btn-sm">Preview page</a>
         <a href="/groups/${escHtml(g.slug)}/edit" class="btn btn-secondary btn-sm">Rename group</a>
         <button type="button" class="btn btn-danger btn-sm grp-delete-btn">Delete group</button>
       </div>
@@ -3403,6 +3717,22 @@ app.post('/api/groups/:slug/reorder-tiles', requireUser, express.json({ limit: '
 });
 
 // Public message viewer — no auth, big copy CTA
+// The public page for a folder — no account, no login. Like /f/ and /m/,
+// the random slug is the permission.
+app.get('/g/:slug', (req, res) => {
+  const g = gdb.getBySlug(req.params.slug);
+  if (!g) {
+    return res.status(404).send(layout({
+      title: 'Not found',
+      user: req.user,
+      body: '<h1>Not found</h1><p>This folder link does not exist or was removed.</p>',
+    }));
+  }
+  res.set('X-Robots-Tag', 'noindex, nofollow');
+  const items = mdb.listInGroup(g.id, g.user_id);
+  res.send(renderPublicGroupPage(g, items, PUBLIC_ORIGIN));
+});
+
 app.get('/m/:slug', (req, res) => {
   const m = mdb.getBySlug(req.params.slug);
   if (!m) {
@@ -3939,6 +4269,23 @@ const MSG_LIST_JS = `
       // ---------- GROUP-card actions (reorder + delete group) ----------
       const grpCard = btn.closest('.grp-card');
       if (grpCard) {
+        // Share the whole folder as a page. navigator.share first on a phone,
+        // so it lands straight in WhatsApp or a DM rather than a clipboard
+        // the person then has to remember to paste.
+        if (btn.classList.contains('grp-share-btn')) {
+          const url = btn.dataset.url;
+          const name = (grpCard.querySelector('.grp-title')?.textContent || 'folder').trim();
+          if (navigator.share) {
+            try { await navigator.share({ title: name, url }); return; } catch (e) { /* fall through to copy */ }
+          }
+          try {
+            await navigator.clipboard.writeText(url);
+            const prev = btn.textContent;
+            btn.textContent = '✓ Link copied!';
+            setTimeout(() => { btn.textContent = prev; }, 1600);
+          } catch { btn.textContent = 'Copy failed'; }
+          return;
+        }
         if (btn.classList.contains('grp-up-btn') || btn.classList.contains('grp-down-btn')) {
           const dir = btn.classList.contains('grp-up-btn') ? 'up' : 'down';
           const sibling = dir === 'up' ? grpCard.previousElementSibling : grpCard.nextElementSibling;
