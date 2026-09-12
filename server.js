@@ -32,6 +32,7 @@ const PORT = parseInt(process.env.PORT || '3000', 10);
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex');
 const SITE_NAME = process.env.SITE_NAME || 'share.bizapp.club';
 const PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN || 'https://share.bizapp.club';
+const IOS_APP_URL = process.env.IOS_APP_URL || 'https://apps.apple.com/app/id6773061117';
 const RECENT_PAGE_SIZE = 10;
 
 // ---------- middleware ----------
@@ -366,6 +367,46 @@ function renderNav(user) {
   `;
 }
 
+// ---------- "also on iPhone" App Store badge ----------
+//
+// The artwork is Apple's own unmodified SVG badge, vendored under
+// /vendor rather than hot-linked, so a blocked developer.apple.com
+// can't leave a broken image on a share page someone was sent.
+// Two variants: the default sits on the light page background, and
+// `dark` is for the auth / landing / message-viewer pages, which are
+// navy. Wording deliberately avoids "upgrade / unlock / free trial /
+// premium" — see the App Review 2.1(b) rule in CLAUDE.md.
+
+const APPSTORE_CSS = `
+  .appstore-cta { display: flex; flex-direction: column; align-items: center; gap: 10px; text-align: center; }
+  .appstore-cta-text { font-size: 13px; color: var(--muted, #666); }
+  .appstore-cta .appstore-badge { display: inline-block; line-height: 0; border-radius: 8px; transition: opacity .15s, transform .15s; }
+  .appstore-cta .appstore-badge:hover { opacity: 0.85; }
+  .appstore-cta .appstore-badge:active { transform: translateY(1px); }
+  .appstore-cta img { display: block; width: 140px; height: 47px; }
+  .appstore-cta--dark .appstore-cta-text { color: rgba(226,232,240,0.6); }
+  .appstore-cta--start { align-items: flex-start; text-align: left; }
+  .site-footer { max-width: 720px; margin: 0 auto; padding: 8px 20px 40px; }
+`;
+
+/**
+ * opts: { text, dark, align }  — all optional.
+ */
+function appStoreCta({ text = 'Also on iPhone — share straight from your phone.', dark = false, align = 'center' } = {}) {
+  const cls = ['appstore-cta', dark ? 'appstore-cta--dark' : '', align === 'start' ? 'appstore-cta--start' : '']
+    .filter(Boolean).join(' ');
+  return `
+    <div class="${cls}">
+      ${text ? `<span class="appstore-cta-text">${escHtml(text)}</span>` : ''}
+      <a class="appstore-badge" href="${escHtml(IOS_APP_URL)}" target="_blank" rel="noopener"
+         aria-label="Download ShareZPresso on the App Store">
+        <img src="/vendor/appstore-badge.svg" width="140" height="47"
+             alt="Download on the App Store" loading="lazy" decoding="async">
+      </a>
+    </div>
+  `;
+}
+
 function layout({ title, body, user, ogTitle, ogDescription, ogImageUrl, noindex = true, wide = false, mainClass = '' }) {
   const og = [
     `<meta property="og:site_name" content="${escHtml(SITE_NAME)}">`,
@@ -385,7 +426,7 @@ function layout({ title, body, user, ogTitle, ogDescription, ogImageUrl, noindex
   <title>${escHtml(title)}</title>
   ${noindex ? '<meta name="robots" content="noindex,nofollow">' : ''}
   ${og}
-  <style>${BASE_CSS}${DEL_MODAL_CSS}${NOTES_MODAL_CSS}${CHAT_CSS}${REORDER_CSS}</style>
+  <style>${BASE_CSS}${DEL_MODAL_CSS}${NOTES_MODAL_CSS}${CHAT_CSS}${REORDER_CSS}${APPSTORE_CSS}</style>
 </head>
 <body>
   <header class="site-header">
@@ -398,6 +439,7 @@ function layout({ title, body, user, ogTitle, ogDescription, ogImageUrl, noindex
   <main${[wide ? 'wide' : '', mainClass].filter(Boolean).length ? ` class="${[wide ? 'wide' : '', mainClass].filter(Boolean).join(' ')}"` : ''}>
     ${body}
   </main>
+  <footer class="site-footer">${appStoreCta()}</footer>
   ${DEL_MODAL_HTML}
   ${NOTES_MODAL_HTML}
   <script>${DEL_MODAL_JS}</script>
@@ -964,7 +1006,7 @@ function renderMessageViewer(m, viewer) {
   <meta name="robots" content="noindex,nofollow">
   <meta property="og:title" content="${escHtml(title)}">
   <meta property="og:description" content="Tap to copy — ready to paste in DMs.">
-  <style>${MSG_VIEWER_CSS}</style>
+  <style>${MSG_VIEWER_CSS}${APPSTORE_CSS}</style>
 </head>
 <body class="mv-body">
   <header class="mv-header">
@@ -985,6 +1027,8 @@ function renderMessageViewer(m, viewer) {
     <article class="mv-body-card" id="mvBody">${linkifyHtml(m.body)}</article>
 
     <p class="mv-hint">Then paste in Instagram, WhatsApp, Facebook DMs — anywhere.</p>
+
+    ${appStoreCta({ text: 'Shared with ShareZPresso — also on iPhone.', dark: true })}
   </main>
 
   <!-- Sticky copy bar on mobile, only after the user scrolls past the top button -->
@@ -1143,7 +1187,7 @@ function renderGuestLandingPage() {
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>Share any file — ${escHtml(SITE_NAME)}</title>
   <meta name="robots" content="noindex,nofollow">
-  <style>${AUTH_CSS}${LANDING_CSS}</style>
+  <style>${AUTH_CSS}${LANDING_CSS}${APPSTORE_CSS}</style>
 </head>
 <body class="auth-body">
   <div class="auth-layout">
@@ -1168,6 +1212,9 @@ function renderGuestLandingPage() {
           <li><span class="auth-feat-icon">📥</span> <div><strong>Built-in viewers</strong><span>Your recipients preview in-browser — no downloads needed.</span></div></li>
           <li><span class="auth-feat-icon">🔒</span> <div><strong>Secure by default</strong><span>Per-file download toggle, optional password links, short URLs.</span></div></li>
         </ul>
+        <div class="auth-footer-note">
+          ${appStoreCta({ text: 'On an iPhone? Upload from the ShareZPresso app.', dark: true, align: 'start' })}
+        </div>
         <div class="auth-footer-note">Already have an account? <a style="color:#86efac;" href="/login">Sign in →</a></div>
       </div>
     </aside>
@@ -1750,7 +1797,7 @@ function renderStandaloneAuthPage({ title, subtitle, body }) {
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>${escHtml(title)} — ${escHtml(SITE_NAME)}</title>
   <meta name="robots" content="noindex,nofollow">
-  <style>${AUTH_CSS}</style>
+  <style>${AUTH_CSS}${APPSTORE_CSS}</style>
 </head>
 <body class="auth-body">
   <div class="auth-layout">
@@ -1796,7 +1843,7 @@ function renderAuthPage({ activeTab, loginErr, signupErr }) {
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>${activeTab === 'signup' ? 'Sign up' : 'Sign in'} — ${escHtml(SITE_NAME)}</title>
   <meta name="robots" content="noindex,nofollow">
-  <style>${AUTH_CSS}</style>
+  <style>${AUTH_CSS}${APPSTORE_CSS}</style>
 </head>
 <body class="auth-body">
   <div class="auth-layout">
@@ -1824,6 +1871,7 @@ function renderAuthPage({ activeTab, loginErr, signupErr }) {
         </ul>
         <div class="auth-footer-note">
           Your files, your folder — connect your own GoHighLevel storage anytime.
+          ${appStoreCta({ text: 'Also on iPhone — share straight from your phone.', dark: true, align: 'start' })}
         </div>
       </div>
     </aside>
