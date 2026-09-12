@@ -2371,6 +2371,128 @@ function linkifyHtml(text) {
 
 // Group card — teal accent header, 2-column grid of orange/teal alternating
 // tiles inside. Each tile has its own compact copy button and a ⋯ menu.
+// ---------- search over saved notes ----------
+//
+// The old /messages search matched title + body of LOOSE notes only, and
+// hid every folder while searching. So the better organised a note was,
+// the harder it was to find — the exact opposite of what filing is for.
+// These helpers render results that span both.
+
+/** Same split the DB layer uses, minus the LIKE escaping — for display. */
+function queryTerms(q) {
+  return (q || '').toString().trim().split(/\s+/).filter(Boolean).slice(0, 6);
+}
+
+/**
+ * Wrap every occurrence of every term in <mark>. Runs on ALREADY-ESCAPED
+ * html, and escapes the terms the same way before matching, so a search
+ * for "R&D" still lines up with the escaped "R&amp;D" in the text.
+ */
+function highlightTerms(escapedText, terms) {
+  let out = escapedText;
+  for (const t of terms) {
+    const needle = escHtml(t).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (!needle) continue;
+    out = out.replace(new RegExp(needle, 'gi'), (hit) => `<mark>${hit}</mark>`);
+  }
+  return out;
+}
+
+/**
+ * A window of the body around the first term that actually appears in it,
+ * not the opening line. Finding "the invoice number" should show you the
+ * invoice number, not the greeting the note happens to start with.
+ */
+function searchSnippet(body, terms, max = 170) {
+  const text = (body || '').toString().replace(/\s+/g, ' ').trim();
+  if (!text) return '';
+  let at = -1;
+  for (const t of terms) {
+    const i = text.toLowerCase().indexOf(t.toLowerCase());
+    if (i >= 0 && (at < 0 || i < at)) at = i;
+  }
+  if (at < 0) return text.length > max ? text.slice(0, max).trimEnd() + '…' : text;
+  const start = Math.max(0, at - 40);
+  const slice = text.slice(start, start + max);
+  return (start > 0 ? '…' : '') + slice.trimEnd() + (start + max < text.length ? '…' : '');
+}
+
+/** One search hit. Same .msg-tile shape as a group tile, so the delegated
+ *  copy / ⋯ handlers in MSG_LIST_JS work here with no extra wiring. */
+function renderResultTile(m, terms, i) {
+  const col = i % 2;
+  const row = Math.floor(i / 2);
+  const themeClass = (col + row) % 2 === 0 ? 'tile-orange' : 'tile-teal';
+  // The folder name is highlighted too: searching a folder's name is how
+  // you pull up "everything in there", and the hit should be visible.
+  const where = m.group_title
+    ? `📁 ${highlightTerms(escHtml(m.group_title), terms)}`
+    : '📄 Loose note';
+  const title = highlightTerms(escHtml(m.title || '(untitled)'), terms);
+  const snippet = highlightTerms(escHtml(searchSnippet(m.body, terms)), terms);
+  return `
+    <div class="msg-tile res-tile ${themeClass}" data-slug="${escHtml(m.slug)}">
+      <button type="button" class="tile-overflow" aria-label="More" data-slug="${escHtml(m.slug)}">⋯</button>
+      <div class="res-where">${where}</div>
+      <div class="tile-title">${title}</div>
+      <div class="tile-preview res-snippet">${snippet}</div>
+      <button type="button" class="tile-copy" data-body='${escHtml(JSON.stringify(m.body))}'>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block; vertical-align:middle; margin-right:4px;"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>Copy
+      </button>
+    </div>
+  `;
+}
+
+/**
+ * The whole results view that replaces the feed while searching:
+ * matching notes first (wherever they live), then any folder whose own
+ * name matched, rendered whole so its contents come with it.
+ */
+function renderSearchResults({ q, hits, groupHits, groupChildren, publicOrigin }) {
+  const terms = queryTerms(q);
+  if (hits.length === 0 && groupHits.length === 0) {
+    return `
+      <div class="recent-empty">
+        Nothing matches <strong>${escHtml(q)}</strong>.<br>
+        <span class="muted" style="font-size:13px;">Search looks inside titles, the note text, and folder names — try one word.</span>
+      </div>`;
+  }
+  const counts = [
+    hits.length ? `${hits.length} note${hits.length === 1 ? '' : 's'}` : '',
+    groupHits.length ? `${groupHits.length} folder${groupHits.length === 1 ? '' : 's'}` : '',
+  ].filter(Boolean).join(' · ');
+
+  return `
+    <div class="res-head">
+      <span class="res-count">🔎 ${counts} for “${escHtml(q)}”</span>
+      <button type="button" class="btn btn-secondary btn-sm" id="res-clear">Clear search</button>
+    </div>
+    ${hits.length ? `<div class="res-grid">${hits.map((m, i) => renderResultTile(m, terms, i)).join('')}</div>` : ''}
+    ${groupHits.length ? `
+      <div class="res-sub">Folders named “${escHtml(q)}”</div>
+      ${groupHits.map(g => renderGroupCard(g, groupChildren.get(g.id) || [], publicOrigin)).join('')}
+    ` : ''}
+  `;
+}
+
+/** Up to 8 dropdown suggestions: note titles first, then folder names. */
+function buildSuggestions(hits, groupHits) {
+  const out = [];
+  for (const g of groupHits.slice(0, 3)) {
+    out.push({ type: 'group', slug: g.slug, title: g.title || '(untitled folder)', where: 'Folder' });
+  }
+  for (const m of hits) {
+    if (out.length >= 8) break;
+    out.push({
+      type: 'message',
+      slug: m.slug,
+      title: m.title || '(untitled)',
+      where: m.group_title ? m.group_title : 'Loose note',
+    });
+  }
+  return out;
+}
+
 function renderGroupCard(g, children, publicOrigin) {
   const tiles = children.map((m, i) => {
     // Checkerboard pattern: alternate by (col + row), not just by i.
@@ -2463,16 +2585,12 @@ app.get('/messages', requireUser, (req, res) => {
   const q = (req.query.q || '').toString().trim().slice(0, 100);
 
   // Unified feed: groups + standalone messages, merged by sort_order DESC.
-  // Search filter applies to standalone messages only for now (group
-  // titles + their children matched separately if we extend later).
-  const standalone = mdb.listRecentByUser(req.user.id, { limit: 200, q });
-  const groupRows = q
-    ? [] // hide groups on search for now — clearer UX, easier to reason about
-    : gdb.listForUser(req.user.id, { limit: 200 });
+  const standalone = q ? [] : mdb.listRecentByUser(req.user.id, { limit: 200 });
+  const groupRows = gdb.listForUser(req.user.id, { limit: 200 });
 
   // Build a unified array sorted by sort_order DESC. Each row is
   // either { kind: 'group', ... } or { kind: 'message', ... }.
-  const feed = [
+  const feed = q ? [] : [
     ...groupRows.map(g => ({ kind: 'group', sort_order: g.sort_order, group: g })),
     ...standalone.map(m => ({ kind: 'message', sort_order: m.sort_order, msg: m })),
   ].sort((a, b) => b.sort_order - a.sort_order);
@@ -2481,6 +2599,14 @@ app.get('/messages', requireUser, (req, res) => {
   const groupChildren = new Map();
   for (const g of groupRows) {
     groupChildren.set(g.id, mdb.listInGroup(g.id, req.user.id));
+  }
+
+  // A ?q= in the URL renders the results server-side, so a deep link (or a
+  // reload after a delete) shows the same thing the live search shows.
+  const hits = q ? mdb.search(req.user.id, q, { limit: 60 }) : [];
+  const groupHits = q ? gdb.search(req.user.id, q, { limit: 20 }) : [];
+  for (const g of groupHits) {
+    if (!groupChildren.has(g.id)) groupChildren.set(g.id, mdb.listInGroup(g.id, req.user.id));
   }
 
   const justSavedSlug = req.query.saved ? req.query.saved.toString().slice(0, 32) : '';
@@ -2515,20 +2641,29 @@ app.get('/messages', requireUser, (req, res) => {
         </script>
       ` : ''}
 
-      <form method="GET" action="/messages" class="msg-search">
-        <input type="text" name="q" value="${escHtml(q)}" placeholder="Search title or body…" autocomplete="off">
-        ${q ? `<a href="/messages" class="btn btn-secondary btn-sm">Clear</a>` : ''}
+      <form method="GET" action="/messages" class="msg-search" id="msg-search" role="search" autocomplete="off">
+        <div class="msg-search-box">
+          <span class="msg-search-icon" aria-hidden="true">🔎</span>
+          <input type="text" name="q" id="msg-q" value="${escHtml(q)}"
+                 placeholder="Search your notes — title, text, or folder…"
+                 autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"
+                 role="combobox" aria-expanded="false" aria-controls="msg-suggest"
+                 aria-autocomplete="list" aria-label="Search your notes">
+          <button type="button" class="msg-search-clear" id="msg-q-clear" aria-label="Clear search"${q ? '' : ' hidden'}>✕</button>
+          <div class="msg-suggest" id="msg-suggest" role="listbox" hidden></div>
+        </div>
+        <noscript><button type="submit" class="btn btn-sm">Search</button></noscript>
       </form>
 
       <div id="msg-list">
-        ${feed.length === 0
-          ? `<div class="recent-empty">${q
-              ? 'No messages match that search.'
-              : 'No saved messages yet. Click <a href="/messages/new">+ New message</a> or <a href="/groups/new">+ New group</a> to start.'}</div>`
-          : feed.map(item => item.kind === 'group'
-              ? renderGroupCard(item.group, groupChildren.get(item.group.id) || [], PUBLIC_ORIGIN)
-              : renderMessageCard(item.msg, PUBLIC_ORIGIN)
-            ).join('')}
+        ${q
+          ? renderSearchResults({ q, hits, groupHits, groupChildren, publicOrigin: PUBLIC_ORIGIN })
+          : (feed.length === 0
+              ? `<div class="recent-empty">No saved messages yet. Click <a href="/messages/new">+ New message</a> or <a href="/groups/new">+ New group</a> to start.</div>`
+              : feed.map(item => item.kind === 'group'
+                  ? renderGroupCard(item.group, groupChildren.get(item.group.id) || [], PUBLIC_ORIGIN)
+                  : renderMessageCard(item.msg, PUBLIC_ORIGIN)
+                ).join(''))}
       </div>
 
       <script>
@@ -2595,6 +2730,7 @@ app.get('/messages', requireUser, (req, res) => {
         }
       </script>
       <script>${MSG_LIST_JS}</script>
+      <script>${MSG_SEARCH_JS}</script>
     `,
   }));
 });
@@ -2745,6 +2881,29 @@ app.get('/messages/:slug/edit', requireUser, (req, res) => {
       </script>
     `,
   }));
+});
+
+// Live search behind the /messages search box. Returns the results markup
+// already rendered (same idiom as /api/recent) so the browser never has to
+// know how a tile is built — and because the results reuse the .msg-tile
+// shape, the delegated copy / ⋯ handlers keep working on them untouched.
+app.get('/api/messages/search', requireUser, (req, res) => {
+  const q = (req.query.q || '').toString().trim().slice(0, 100);
+  if (!q) return res.json({ ok: true, q: '', html: '', count: 0, suggestions: [] });
+
+  const hits = mdb.search(req.user.id, q, { limit: 60 });
+  const groupHits = gdb.search(req.user.id, q, { limit: 20 });
+  const groupChildren = new Map();
+  for (const g of groupHits) groupChildren.set(g.id, mdb.listInGroup(g.id, req.user.id));
+
+  res.json({
+    ok: true,
+    q,
+    count: hits.length,
+    groupCount: groupHits.length,
+    suggestions: buildSuggestions(hits, groupHits),
+    html: renderSearchResults({ q, hits, groupHits, groupChildren, publicOrigin: PUBLIC_ORIGIN }),
+  });
 });
 
 app.post('/api/messages', requireUser, express.json({ limit: '2mb' }), (req, res) => {
@@ -2958,9 +3117,53 @@ app.get('/m/:slug', (req, res) => {
 const MESSAGES_CSS = `
   .msg-page-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
   .msg-page-head h1 { margin: 0; }
-  .msg-search { display: flex; gap: 8px; margin: 16px 0; }
-  .msg-search input[type="text"] { flex: 1; padding: 12px 14px; font-size: 15px; border: 1px solid var(--border); border-radius: 10px; background: #fff; }
+  /* ---------- search ---------- */
+  .msg-search { display: flex; gap: 8px; margin: 16px 0; position: sticky; top: 0; z-index: 30; background: var(--bg); padding: 8px 0; }
+  .msg-search-box { position: relative; flex: 1; }
+  .msg-search input[type="text"] { width: 100%; padding: 13px 40px 13px 40px; font-size: 16px; border: 1px solid var(--border); border-radius: 12px; background: #fff; }
   .msg-search input[type="text"]:focus { outline: 0; border-color: var(--brand); box-shadow: 0 0 0 4px rgba(37,99,235,0.12); }
+  .msg-search-icon { position: absolute; left: 13px; top: 50%; transform: translateY(-50%); font-size: 15px; pointer-events: none; opacity: 0.7; }
+  .msg-search.is-busy .msg-search-icon { animation: msg-pulse 0.7s ease-in-out infinite; }
+  @keyframes msg-pulse { 50% { opacity: 0.25; } }
+  .msg-search-clear {
+    position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+    width: 28px; height: 28px; border: 0; border-radius: 50%;
+    background: #e2e8f0; color: #475569; font-size: 13px; line-height: 1; cursor: pointer;
+  }
+  .msg-search-clear:hover { background: #cbd5e1; }
+  .msg-suggest {
+    position: absolute; left: 0; right: 0; top: calc(100% + 6px); z-index: 40;
+    background: #fff; border: 1px solid var(--border); border-radius: 12px;
+    box-shadow: 0 12px 30px rgba(15,23,42,0.16); overflow: hidden auto; max-height: 320px;
+  }
+  .msg-suggest-item {
+    display: flex; align-items: center; gap: 10px; width: 100%;
+    padding: 10px 12px; border: 0; background: #fff; cursor: pointer; text-align: left;
+    border-bottom: 1px solid #f1f5f9;
+  }
+  .msg-suggest-item:last-child { border-bottom: 0; }
+  .msg-suggest-item:hover, .msg-suggest-item.is-active { background: #eff6ff; }
+  .msg-suggest-icon { font-size: 15px; flex: 0 0 auto; }
+  .msg-suggest-text { display: flex; flex-direction: column; min-width: 0; }
+  .msg-suggest-title { font-size: 14px; font-weight: 600; color: var(--fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .msg-suggest-where { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* ---------- search results ---------- */
+  .res-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 4px 0 10px; flex-wrap: wrap; }
+  .res-count { font-size: 14px; font-weight: 600; color: var(--fg); }
+  .res-sub { font-size: 13px; font-weight: 600; color: var(--muted); margin: 18px 0 8px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .res-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-bottom: 8px; }
+  @media (max-width: 520px) { .res-grid { grid-template-columns: 1fr; } }
+  .res-tile { padding-top: 9px; }
+  .res-where { font-size: 10.5px; font-weight: 700; color: #475569; opacity: 0.85; margin-bottom: 3px;
+               white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-right: 22px; }
+  .res-snippet { white-space: normal; }
+  .res-tile mark, .msg-card mark { background: #fde68a; color: #111; border-radius: 3px; padding: 0 1px; }
+  .res-flash { animation: res-flash 1.4s ease-out; }
+  @keyframes res-flash {
+    0%, 60% { box-shadow: 0 0 0 3px rgba(37,99,235,0.55); }
+    100%    { box-shadow: 0 0 0 0 rgba(37,99,235,0); }
+  }
 
   .msg-page-actions { display: flex; gap: 8px; align-items: center; }
 
@@ -3164,6 +3367,196 @@ const MESSAGES_CSS = `
   }
   textarea:hover { border-color: #cbd5e1; }
   textarea:focus { outline: 0; border-color: var(--brand); box-shadow: 0 0 0 4px rgba(37,99,235,0.12); }
+`;
+
+// ---------- live search on /messages ----------
+//
+// Typing filters the page as you go and offers the top matches in a
+// dropdown. Everything it needs is one endpoint away and the markup comes
+// back rendered, so this file only has to worry about *when* to ask.
+//
+// The un-searched feed is kept in memory rather than re-fetched, so
+// clearing the box is instant and can never fail.
+
+const MSG_SEARCH_JS = `
+  (function () {
+    var form  = document.getElementById('msg-search');
+    var input = document.getElementById('msg-q');
+    var list  = document.getElementById('msg-list');
+    var box   = document.getElementById('msg-suggest');
+    var clearBtn = document.getElementById('msg-q-clear');
+    if (!form || !input || !list || !box) return;
+
+    // The browsed (un-searched) feed, captured before the first search.
+    var feedHtml = input.value.trim() ? null : list.innerHTML;
+    var timer = null, seq = 0, controller = null;
+    var sugg = [], active = -1;
+
+    function setUrl(q) {
+      try {
+        var u = new URL(location.href);
+        if (q) u.searchParams.set('q', q); else u.searchParams.delete('q');
+        history.replaceState(null, '', u.pathname + (u.search || ''));
+      } catch (e) {}
+    }
+
+    function closeSuggest() {
+      box.hidden = true;
+      box.innerHTML = '';
+      input.setAttribute('aria-expanded', 'false');
+      sugg = []; active = -1;
+    }
+
+    function renderSuggest(items) {
+      sugg = items || []; active = -1;
+      if (!sugg.length) return closeSuggest();
+      box.innerHTML = sugg.map(function (s, i) {
+        return '<button type="button" class="msg-suggest-item" role="option" data-i="' + i + '">' +
+                 '<span class="msg-suggest-icon">' + (s.type === 'group' ? '📁' : '📄') + '</span>' +
+                 '<span class="msg-suggest-text">' +
+                   '<span class="msg-suggest-title"></span>' +
+                   '<span class="msg-suggest-where"></span>' +
+                 '</span>' +
+               '</button>';
+      }).join('');
+      // Titles are set as text, never as html — a note title is user content.
+      Array.prototype.forEach.call(box.querySelectorAll('.msg-suggest-item'), function (el, i) {
+        el.querySelector('.msg-suggest-title').textContent = sugg[i].title;
+        el.querySelector('.msg-suggest-where').textContent = sugg[i].where;
+      });
+      box.hidden = false;
+      input.setAttribute('aria-expanded', 'true');
+    }
+
+    function markActive(n) {
+      var items = box.querySelectorAll('.msg-suggest-item');
+      if (!items.length) return;
+      active = (n + items.length) % items.length;
+      Array.prototype.forEach.call(items, function (el, i) {
+        el.classList.toggle('is-active', i === active);
+        if (i === active && el.scrollIntoView) el.scrollIntoView({ block: 'nearest' });
+      });
+    }
+
+    // Land on the thing you picked: narrow to it, then flash its card so
+    // the eye finds it without hunting.
+    function flash(slug) {
+      var el = list.querySelector('[data-slug="' + (window.CSS && CSS.escape ? CSS.escape(slug) : slug) + '"]');
+      if (!el) return;
+      if (el.scrollIntoView) el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      el.classList.add('res-flash');
+      setTimeout(function () { el.classList.remove('res-flash'); }, 1400);
+    }
+
+    function pick(i) {
+      var s = sugg[i];
+      if (!s) return;
+      input.value = s.title;
+      closeSuggest();
+      run(s.title, function () { flash(s.slug); });
+    }
+
+    function restoreFeed() {
+      closeSuggest();
+      clearBtn.hidden = true;
+      setUrl('');
+      if (feedHtml != null) {
+        list.innerHTML = feedHtml;
+        if (typeof window.initTileDragAndDrop === 'function') window.initTileDragAndDrop();
+      } else {
+        location.href = '/messages';
+      }
+    }
+
+    async function run(q, after) {
+      q = (q || '').trim();
+      clearBtn.hidden = !q;
+      if (!q) return restoreFeed();
+
+      var mine = ++seq;
+      if (controller) { try { controller.abort(); } catch (e) {} }
+      controller = new AbortController();
+      var busy = setTimeout(function () { form.classList.add('is-busy'); }, 200);
+      try {
+        var res = await fetch('/api/messages/search?q=' + encodeURIComponent(q), {
+          credentials: 'same-origin', signal: controller.signal,
+        });
+        if (!res.ok) throw new Error('search failed');
+        var data = await res.json();
+        if (mine !== seq) return;            // a newer keystroke already won
+        list.innerHTML = data.html;
+        renderSuggest(data.suggestions);
+        setUrl(q);
+        if (after) after();
+      } catch (err) {
+        if (err && err.name === 'AbortError') return;
+        if (mine !== seq) return;
+        list.innerHTML = '<div class="recent-empty">Search is not responding. Check your connection and try again.</div>';
+      } finally {
+        clearTimeout(busy);
+        if (mine === seq) form.classList.remove('is-busy');
+      }
+    }
+
+    input.addEventListener('input', function () {
+      clearTimeout(timer);
+      var q = input.value;
+      clearBtn.hidden = !q.trim();
+      timer = setTimeout(function () { run(q); }, 140);
+    });
+
+    input.addEventListener('keydown', function (e) {
+      if (e.key === 'ArrowDown') { e.preventDefault(); markActive(active + 1); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); markActive(active - 1); }
+      else if (e.key === 'Enter') {
+        e.preventDefault();
+        clearTimeout(timer);
+        if (active >= 0) pick(active); else { closeSuggest(); run(input.value); }
+      } else if (e.key === 'Escape') {
+        if (!box.hidden) { closeSuggest(); }
+        else { input.value = ''; restoreFeed(); }
+      }
+    });
+
+    box.addEventListener('mousedown', function (e) {
+      var item = e.target.closest('.msg-suggest-item');
+      if (!item) return;
+      e.preventDefault();                     // keep focus in the input
+      pick(parseInt(item.dataset.i, 10));
+    });
+
+    clearBtn.addEventListener('click', function () { input.value = ''; input.focus(); restoreFeed(); });
+    form.addEventListener('submit', function (e) { e.preventDefault(); clearTimeout(timer); closeSuggest(); run(input.value); });
+
+    document.addEventListener('click', function (e) {
+      if (!e.target.closest('#msg-search')) closeSuggest();
+    });
+
+    // "Clear search" button inside a rendered results block.
+    list.addEventListener('click', function (e) {
+      if (e.target.closest('#res-clear')) { input.value = ''; restoreFeed(); }
+    });
+
+    // "/" jumps to the search box, the way every list people live in works.
+    document.addEventListener('keydown', function (e) {
+      if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return;
+      var t = e.target;
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+      e.preventDefault();
+      input.focus();
+      input.select();
+    });
+
+    // A ?q= deep link arrives already rendered by the server; make sure the
+    // dropdown knows about it so ↑/↓ work without retyping.
+    if (input.value.trim()) {
+      clearBtn.hidden = false;
+      fetch('/api/messages/search?q=' + encodeURIComponent(input.value.trim()), { credentials: 'same-origin' })
+        .then(function (r) { return r.json(); })
+        .then(function (d) { sugg = d.suggestions || []; })
+        .catch(function () {});
+    }
+  })();
 `;
 
 const MSG_LIST_JS = `
