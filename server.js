@@ -426,7 +426,7 @@ function layout({ title, body, user, ogTitle, ogDescription, ogImageUrl, noindex
   <title>${escHtml(title)}</title>
   ${noindex ? '<meta name="robots" content="noindex,nofollow">' : ''}
   ${og}
-  <style>${BASE_CSS}${DEL_MODAL_CSS}${NOTES_MODAL_CSS}${CHAT_CSS}${REORDER_CSS}${APPSTORE_CSS}</style>
+  <style>${BASE_CSS}${DEL_MODAL_CSS}${NOTES_MODAL_CSS}${CHAT_CSS}${REORDER_CSS}${APPSTORE_CSS}${PREVIEW_CSS}</style>
 </head>
 <body>
   <header class="site-header">
@@ -442,8 +442,10 @@ function layout({ title, body, user, ogTitle, ogDescription, ogImageUrl, noindex
   <footer class="site-footer">${appStoreCta()}</footer>
   ${DEL_MODAL_HTML}
   ${NOTES_MODAL_HTML}
+  ${PREVIEW_HTML}
   <script>${DEL_MODAL_JS}</script>
   <script>${NOTES_MODAL_JS}</script>
+  <script>${PREVIEW_JS}</script>
 </body>
 </html>`;
 }
@@ -594,6 +596,302 @@ const DEL_MODAL_JS = `
 // This is the same modal shape as the delete confirm, with a textarea.
 // window.__editNotes({ value, title, then(text) }) opens it; `then` fires
 // with the new text only if the user saves.
+
+// ---------- quick preview of a saved note ----------
+//
+// A grid of tiles shows two clipped lines each, which is not enough to
+// answer "is this the one I want — keep it, move it, bin it?" without
+// opening every single one in its own tab. That was the whole problem:
+// deciding required navigating away and coming back, seven times over.
+//
+// The fix costs nothing to fetch, because the full text is ALREADY on the
+// page — the Copy button carries it in data-body. So hovering a tile can
+// show the entire note instantly, offline, with no request at all.
+//
+// Two ways in, because a mouse and a thumb are not the same:
+//   • fine pointer  → hover (a beat of delay so it doesn't flicker while
+//                     the mouse crosses the grid), and the popover itself
+//                     is hoverable so a long note can be scrolled.
+//   • touch / click → a pinned sheet, dismissed by the backdrop or Esc.
+
+const PREVIEW_HTML = `
+  <div class="prev-backdrop" id="prev-backdrop" hidden></div>
+  <div class="prev-pop" id="prev-pop" hidden role="dialog" aria-modal="false" aria-labelledby="prev-title">
+    <div class="prev-head">
+      <div class="prev-head-text">
+        <div class="prev-title" id="prev-title"></div>
+        <div class="prev-where" id="prev-where"></div>
+      </div>
+      <button type="button" class="prev-close" id="prev-close" aria-label="Close preview">✕</button>
+    </div>
+    <pre class="prev-body" id="prev-body"></pre>
+    <div class="prev-foot">
+      <button type="button" class="prev-btn prev-btn-copy" id="prev-copy">📋 Copy</button>
+      <a class="prev-btn" id="prev-edit" href="#">Edit</a>
+      <a class="prev-btn" id="prev-open" href="#" target="_blank" rel="noopener">Open</a>
+      <button type="button" class="prev-btn prev-btn-out" id="prev-out" hidden>Remove from folder</button>
+      <button type="button" class="prev-btn prev-btn-del" id="prev-del">Delete</button>
+    </div>
+  </div>
+`;
+
+const PREVIEW_CSS = `
+  .prev-backdrop { position: fixed; inset: 0; z-index: 9500; background: rgba(15,23,42,0.45); }
+  .prev-backdrop[hidden] { display: none; }
+  .prev-pop {
+    position: fixed; z-index: 9600;
+    width: min(460px, calc(100vw - 24px));
+    background: #fff; border: 1px solid var(--border); border-radius: 14px;
+    box-shadow: 0 24px 60px -18px rgba(15,23,42,0.45);
+    display: flex; flex-direction: column; overflow: hidden;
+    animation: prevPop .12s ease-out;
+  }
+  .prev-pop[hidden] { display: none; }
+  @keyframes prevPop { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+  .prev-head { display: flex; align-items: flex-start; gap: 8px; padding: 12px 12px 8px; border-bottom: 1px solid #f1f5f9; }
+  .prev-head-text { min-width: 0; flex: 1; }
+  .prev-title { font-size: 15px; font-weight: 700; color: var(--fg); line-height: 1.3; word-break: break-word; }
+  .prev-where { font-size: 11.5px; font-weight: 600; color: var(--muted); margin-top: 2px; }
+  .prev-close {
+    flex: 0 0 auto; width: 28px; height: 28px; border: 0; border-radius: 50%;
+    background: #f1f5f9; color: #475569; cursor: pointer; font-size: 13px; line-height: 1;
+  }
+  .prev-close:hover { background: #e2e8f0; }
+  /* The note itself: real line breaks kept, because these are scripts and
+     DMs where the breaks are the formatting. */
+  .prev-body {
+    margin: 0; padding: 12px; overflow: auto;
+    max-height: min(52vh, 460px);
+    font: 13.5px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: pre-wrap; word-break: break-word; color: #1e293b; background: #fff;
+    overscroll-behavior: contain;
+  }
+  .prev-foot { display: flex; gap: 6px; flex-wrap: wrap; padding: 10px 12px; border-top: 1px solid #f1f5f9; background: #f8fafc; }
+  .prev-btn {
+    flex: 0 1 auto; padding: 8px 12px; min-height: 36px;
+    border: 1px solid var(--border); border-radius: 9px; background: #fff;
+    font: inherit; font-size: 13px; font-weight: 600; color: var(--fg);
+    cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; justify-content: center;
+  }
+  .prev-btn:hover { background: #f3f4f6; }
+  .prev-btn-copy { flex: 1 1 120px; background: var(--brand); border-color: var(--brand); color: #fff; }
+  .prev-btn-copy:hover { background: var(--brand-dark); }
+  .prev-btn-copy.is-copied { background: var(--ok); border-color: var(--ok); }
+  .prev-btn-del { color: var(--err); border-color: #fecaca; }
+  .prev-btn-del:hover { background: #fef2f2; }
+  .prev-btn[hidden] { display: none; }
+  /* Pinned (tap / click) mode: centred sheet rather than a floating card. */
+  .prev-pop.is-pinned {
+    left: 50%; top: 50%; transform: translate(-50%, -50%);
+    width: min(560px, calc(100vw - 24px));
+  }
+  .prev-pop.is-pinned .prev-body { max-height: min(60vh, 560px); }
+  /* On a touch screen there is no hover, so the tile body advertises the tap. */
+  @media (hover: hover) and (pointer: fine) {
+    .msg-tile .tile-title, .msg-tile .tile-preview { cursor: zoom-in; }
+  }
+`;
+
+const PREVIEW_JS = `
+  (function () {
+    var pop = document.getElementById('prev-pop');
+    var backdrop = document.getElementById('prev-backdrop');
+    if (!pop || !backdrop) return;
+
+    var elTitle = document.getElementById('prev-title');
+    var elWhere = document.getElementById('prev-where');
+    var elBody  = document.getElementById('prev-body');
+    var btnCopy = document.getElementById('prev-copy');
+    var btnOut  = document.getElementById('prev-out');
+    var btnDel  = document.getElementById('prev-del');
+    var lnkEdit = document.getElementById('prev-edit');
+    var lnkOpen = document.getElementById('prev-open');
+    var btnClose = document.getElementById('prev-close');
+
+    var canHover = window.matchMedia && window.matchMedia('(hover: hover) and (pointer: fine)').matches;
+    var openTimer = null, closeTimer = null;
+    var current = null;        // { slug, body, title, where, inGroup, el }
+    var pinned = false;
+
+    // ---- reading a card -------------------------------------------------
+    // Tiles and the bigger standalone cards keep the full text in the same
+    // place: the Copy button's data-body. Nothing to fetch, ever.
+    function read(el) {
+      var copyBtn = el.querySelector('.tile-copy[data-body], .btn-copy-big[data-body]');
+      if (!copyBtn) return null;
+      var body;
+      try { body = JSON.parse(copyBtn.dataset.body); } catch (e) { return null; }
+      var titleEl = el.querySelector('.tile-title, .msg-card-title');
+      var group = el.closest('.grp-card');
+      var whereEl = el.querySelector('.res-where');
+      var where = whereEl ? whereEl.textContent.trim()
+                : (group ? '📁 ' + (group.querySelector('.grp-title') || {}).textContent : '📄 Loose note');
+      return {
+        el: el,
+        slug: el.dataset.slug,
+        body: body,
+        title: titleEl ? titleEl.textContent.trim() : '(untitled)',
+        where: (where || '').trim(),
+        inGroup: !!group || /^📁/.test(where || ''),
+      };
+    }
+
+    function fill(data) {
+      current = data;
+      elTitle.textContent = data.title || '(untitled)';
+      elWhere.textContent = data.where || '';
+      elBody.textContent = data.body && data.body.length ? data.body : '(this note is empty)';
+      elBody.scrollTop = 0;
+      lnkEdit.href = '/messages/' + encodeURIComponent(data.slug) + '/edit';
+      lnkOpen.href = '/m/' + encodeURIComponent(data.slug);
+      btnOut.hidden = !data.inGroup;
+      btnCopy.classList.remove('is-copied');
+      btnCopy.textContent = '📋 Copy';
+    }
+
+    // ---- placement ------------------------------------------------------
+    // Beside the tile if there is room, otherwise flipped or clamped — a
+    // preview that opens off-screen is worse than none.
+    function place(el) {
+      pop.classList.remove('is-pinned');
+      pop.style.left = '0px';
+      pop.style.top = '0px';
+      var r = el.getBoundingClientRect();
+      var w = pop.offsetWidth, h = pop.offsetHeight;
+      var gap = 10, margin = 8;
+      var left = r.right + gap;
+      if (left + w > window.innerWidth - margin) left = r.left - gap - w;
+      if (left < margin) left = Math.min(Math.max(margin, r.left), window.innerWidth - w - margin);
+      var top = r.top + r.height / 2 - h / 2;
+      if (top < margin) top = margin;
+      if (top + h > window.innerHeight - margin) top = Math.max(margin, window.innerHeight - h - margin);
+      pop.style.left = Math.round(left) + 'px';
+      pop.style.top = Math.round(top) + 'px';
+    }
+
+    function showHover(el) {
+      var data = read(el);
+      if (!data) return;
+      pinned = false;
+      fill(data);
+      backdrop.hidden = true;
+      pop.hidden = false;
+      pop.setAttribute('aria-modal', 'false');
+      place(el);
+    }
+
+    function showPinned(el) {
+      var data = read(el);
+      if (!data) return;
+      pinned = true;
+      fill(data);
+      pop.hidden = false;
+      pop.classList.add('is-pinned');
+      pop.style.left = '';
+      pop.style.top = '';
+      backdrop.hidden = false;
+      pop.setAttribute('aria-modal', 'true');
+      btnClose.focus();
+    }
+
+    function hide() {
+      clearTimeout(openTimer); clearTimeout(closeTimer);
+      pop.hidden = true;
+      backdrop.hidden = true;
+      pop.classList.remove('is-pinned');
+      pinned = false;
+      current = null;
+    }
+
+    // Never fight a drag: SortableJS marks the tile being carried.
+    function dragging() { return !!document.querySelector('.sortable-ghost, .sortable-chosen'); }
+
+    // ---- hover ----------------------------------------------------------
+    if (canHover) {
+      document.addEventListener('mouseover', function (e) {
+        if (pinned || dragging()) return;
+        var el = e.target.closest('.msg-tile, .msg-card');
+        if (!el) return;
+        // Buttons keep their own jobs — no preview popping over a menu.
+        if (e.target.closest('button, a, .tile-menu, .move-menu')) return;
+        if (current && current.el === el && !pop.hidden) return;
+        clearTimeout(closeTimer);
+        clearTimeout(openTimer);
+        openTimer = setTimeout(function () { showHover(el); }, 180);
+      });
+
+      document.addEventListener('mouseout', function (e) {
+        if (pinned) return;
+        var to = e.relatedTarget;
+        if (to && (to.closest('#prev-pop') || (current && to.closest('.msg-tile, .msg-card') === current.el))) return;
+        clearTimeout(openTimer);
+        closeTimer = setTimeout(hide, 140);
+      });
+
+      pop.addEventListener('mouseenter', function () { clearTimeout(closeTimer); });
+      pop.addEventListener('mouseleave', function () { if (!pinned) closeTimer = setTimeout(hide, 140); });
+      window.addEventListener('scroll', function () { if (!pinned && !pop.hidden) hide(); }, true);
+      document.addEventListener('mousedown', function (e) {
+        if (!pinned && !pop.hidden && !e.target.closest('#prev-pop')) hide();
+      });
+    }
+
+    // ---- tap / click to pin ---------------------------------------------
+    document.addEventListener('click', function (e) {
+      if (e.target.closest('#prev-pop') || e.target.closest('#prev-backdrop')) return;
+      var el = e.target.closest('.msg-tile, .msg-card');
+      if (!el) return;
+      if (e.target.closest('button, a, input, .tile-menu, .move-menu')) return;
+      e.preventDefault();
+      showPinned(el);
+    });
+
+    backdrop.addEventListener('click', hide);
+    btnClose.addEventListener('click', hide);
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !pop.hidden) hide(); });
+
+    // ---- actions inside the preview -------------------------------------
+    btnCopy.addEventListener('click', async function () {
+      if (!current) return;
+      try {
+        await navigator.clipboard.writeText(current.body);
+        btnCopy.classList.add('is-copied');
+        btnCopy.textContent = '✓ Copied';
+        if (navigator.vibrate) { try { navigator.vibrate(12); } catch (e) {} }
+      } catch (err) { alert('Copy failed.'); }
+    });
+
+    btnOut.addEventListener('click', async function () {
+      if (!current) return;
+      var slug = current.slug;
+      try {
+        var res = await fetch('/api/messages/' + slug + '/move-to-group', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ groupSlug: '' }), credentials: 'same-origin',
+        });
+        if (!res.ok) throw 0;
+        location.reload();
+      } catch (err) { alert('Move failed.'); }
+    });
+
+    btnDel.addEventListener('click', function () {
+      if (!current) return;
+      var slug = current.slug, title = current.title, el = current.el;
+      hide();
+      window.__confirmDelete({
+        title: 'Delete this message?',
+        message: 'You\\'re about to delete "' + title + '". This action is permanent — the message and its share link will be gone forever.',
+        then: async function () {
+          try {
+            var res = await fetch('/api/messages/' + slug + '/delete', { method: 'POST', credentials: 'same-origin' });
+            if (!res.ok) throw 0;
+            el.remove();
+          } catch (err) { alert('Delete failed.'); }
+        }
+      });
+    });
+  })();
+`;
 
 const NOTES_MODAL_HTML = `
   <div class="notes-modal-backdrop" id="notes-modal" hidden role="dialog" aria-modal="true" aria-labelledby="notes-modal-title">
