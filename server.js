@@ -26,6 +26,7 @@ const { classify, SIZE_CAPS, fmtBytes } = require('./lib/classify');
 const viewers = require('./lib/viewers');
 const apns = require('./lib/apns');
 const apiV1 = require('./lib/api_v1');
+const pagesRoutes = require('./lib/pages_routes');
 
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -360,6 +361,7 @@ function renderNav(user) {
       <a href="/upload">Upload</a>
       <a href="/chats">Chats</a>
       <a href="/messages">Messages</a>
+      <a href="/page">My page</a>
       <a href="/account">Account</a>
       ${adminLink}
       <form method="POST" action="/logout" style="display:inline;"><button type="submit">Log out</button></form>
@@ -1238,6 +1240,7 @@ function renderRecentCard(r) {
         <button type="button" class="btn btn-secondary rename-btn" data-slug="${escHtml(r.slug)}">Rename</button>
         <button type="button" class="btn btn-secondary notes-btn" data-slug="${escHtml(r.slug)}">${notes ? 'Edit notes' : 'Add notes'}</button>
         <button type="button" class="btn btn-secondary toggle-dl-btn" data-slug="${escHtml(r.slug)}">Toggle download</button>
+        <a class="btn btn-secondary" href="/page?add=file&amp;ref=${escHtml(r.slug)}#add-form">➕ Add to my page</a>
         <button type="button" class="btn btn-danger delete-btn" data-slug="${escHtml(r.slug)}" data-title="${escHtml(title)}">Delete</button>
       </div>
     </div>
@@ -2942,6 +2945,17 @@ const PUBLIC_GROUP_JS = `
       } catch (e) { return false; }
     }
 
+    // Tell the owner which notes people actually take. sendBeacon never
+    // blocks the Copy button and survives the visitor leaving the page.
+    function ping(slug) {
+      if (!slug) return;
+      try {
+        if (navigator.sendBeacon) navigator.sendBeacon('/api/note-copied/' + encodeURIComponent(slug));
+        else fetch('/api/note-copied/' + encodeURIComponent(slug), { method: 'POST', keepalive: true });
+      } catch (e) {}
+    }
+    var openSlug = '';
+
     function bodyOf(card) {
       var btn = card.querySelector('.pub-copy');
       try { return JSON.parse(btn.dataset.body); } catch (e) { return ''; }
@@ -2952,6 +2966,7 @@ const PUBLIC_GROUP_JS = `
       if (copyBtn) {
         var card = copyBtn.closest('.pub-card');
         var okCopy = await copyText(bodyOf(card));
+        if (okCopy) ping(card.dataset.slug);
         if (okCopy) {
           copyBtn.classList.add('is-copied');
           var original = copyBtn.innerHTML;
@@ -2972,6 +2987,7 @@ const PUBLIC_GROUP_JS = `
       if (read) {
         var c = read.closest('.pub-card');
         openBody = bodyOf(c);
+        openSlug = c.dataset.slug || '';
         sheetTitle.textContent = (c.querySelector('.pub-card-title') || {}).textContent || '';
         sheetBody.textContent = openBody;
         sheetBody.scrollTop = 0;
@@ -2995,6 +3011,7 @@ const PUBLIC_GROUP_JS = `
 
     sheetCopy.addEventListener('click', async function () {
       var okCopy = await copyText(openBody);
+      if (okCopy) ping(openSlug);
       if (okCopy) {
         sheetCopy.classList.add('is-copied');
         sheetCopy.textContent = '✓ Copied';
@@ -3151,6 +3168,7 @@ function renderGroupCard(g, children, publicOrigin) {
                 data-url="${escHtml(publicOrigin)}/g/${escHtml(g.slug)}">🔗 Copy share link</button>
         <a href="${escHtml(publicOrigin)}/g/${escHtml(g.slug)}" target="_blank" rel="noopener"
            class="btn btn-secondary btn-sm">Preview page</a>
+        <a href="/page?add=folder&amp;ref=${escHtml(g.slug)}#add-form" class="btn btn-secondary btn-sm">➕ Add to my page</a>
         <a href="/groups/${escHtml(g.slug)}/edit" class="btn btn-secondary btn-sm">Rename group</a>
         <button type="button" class="btn btn-danger btn-sm grp-delete-btn">Delete group</button>
       </div>
@@ -6423,6 +6441,7 @@ app.get('/chats', requireUser, (req, res) => {
               <button type="button" class="btn btn-secondary chat-copy" data-url="${escHtml(link)}">Copy link</button>
               <a class="btn btn-secondary" href="/c/${escHtml(c.slug)}" target="_blank" rel="noopener">Open</a>
               <a class="btn btn-secondary" href="/chats/${escHtml(c.slug)}/edit">Edit</a>
+              <a class="btn btn-secondary" href="/page?add=chat&amp;ref=${escHtml(c.slug)}#add-form">➕ My page</a>
             </div>
           </div>
         </div>
@@ -7317,6 +7336,25 @@ apiV1.attach(app, {
   // Chat-scroll gating lives in server.js so the web pages and the iOS API
   // enforce exactly the same limits from one definition.
   chatHelpers: { gate: chatGate, itemCap: chatItemCap, purge: purgeChatImages },
+});
+
+// "My page" — the public /@<handle> link-in-bio page and its editor.
+pagesRoutes.attach(app, {
+  db: { users: udb, files: fdb, groups: gdb, messages: mdb, chats: cdb, raw: require('./lib/db').raw },
+  users,
+  ghl,
+  classify: { classify, fmtBytes },
+  upload,
+  layout,
+  escHtml,
+  reorderBar,
+  REORDER_JS,
+  appStoreCta,
+  APPSTORE_CSS,
+  PUBLIC_ORIGIN,
+  SITE_NAME,
+  requireUser,
+  kindEmoji,
 });
 
 // Admin-only DB peek for debugging the progressive-signup flow.
