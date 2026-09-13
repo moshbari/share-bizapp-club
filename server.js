@@ -7354,6 +7354,7 @@ pagesRoutes.attach(app, {
   PUBLIC_ORIGIN,
   SITE_NAME,
   requireUser,
+  requireApiToken: apiV1.attach.requireApiToken,
   kindEmoji,
 });
 
