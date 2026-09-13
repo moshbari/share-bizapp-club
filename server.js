@@ -361,7 +361,7 @@ function renderNav(user) {
       <a href="/upload">Upload</a>
       <a href="/chats">Chats</a>
       <a href="/messages">Messages</a>
-      <a href="/page">My page</a>
+      <a href="/page">My pages</a>
       <a href="/account">Account</a>
       ${adminLink}
       <form method="POST" action="/logout" style="display:inline;"><button type="submit">Log out</button></form>
