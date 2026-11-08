@@ -5479,7 +5479,7 @@ app.get('/raw/:slug', async (req, res) => {
     // playback. GHL's CDN supports range requests natively.
     const headers = {};
     if (req.headers.range) headers.range = req.headers.range;
-    const upstream = await fetch(rec.ghl_url, { headers });
+    const upstream = await ghl.fetchStored(rec.ghl_url, { headers });
     if (!upstream.ok || !upstream.body) return res.status(502).send('Upstream error');
 
     // Mirror the upstream status (200 for a full body, 206 for a partial
@@ -5520,7 +5520,7 @@ app.get('/d/:slug', async (req, res) => {
     // the whole body if the client only asked for a slice.
     const headers = {};
     if (req.headers.range) headers.range = req.headers.range;
-    const upstream = await fetch(rec.ghl_url, { headers });
+    const upstream = await ghl.fetchStored(rec.ghl_url, { headers });
     if (!upstream.ok || !upstream.body) return res.status(502).send('Upstream error');
     res.status(upstream.status);
     res.set('Content-Type', rec.mime_type || 'application/octet-stream');
@@ -5592,7 +5592,7 @@ app.get('/f/:slug', async (req, res) => {
         `;
       } else {
         try {
-          const upstream = await fetch(rec.ghl_url);
+          const upstream = await ghl.fetchStored(rec.ghl_url);
           const text = await upstream.text();
           body = viewers.renderText(rec, text, SITE_NAME);
         } catch (err) {
@@ -6820,7 +6820,7 @@ app.get('/cr/:slug/:id', async (req, res) => {
   if (!item) return res.status(404).send('Not found');
 
   try {
-    const upstream = await fetch(item.ghl_url);
+    const upstream = await ghl.fetchStored(item.ghl_url);
     if (!upstream.ok || !upstream.body) return res.status(502).send('Upstream error');
     res.status(200);
     res.set('Content-Type', item.mime_type || 'image/jpeg');
@@ -7273,7 +7273,7 @@ app.get('/privacy', (req, res) => {
     <h2>What we collect</h2>
     <ul>
       <li><strong>Account info</strong> — email and name when you sign up. Email is used to identify you and to send password-reset links.</li>
-      <li><strong>Files you upload</strong> — stored on our content delivery partner (GoHighLevel Media) so they can be served at the share link. We never share the contents of your files with anyone except people who have your share link.</li>
+      <li><strong>Files you upload</strong> — stored with our storage partners (Cloudflare R2; older files on GoHighLevel Media) so they can be served at the share link. We never share the contents of your files with anyone except people who have your share link.</li>
       <li><strong>Saved text snippets</strong> — stored in our database under your account. We never read or share them.</li>
       <li><strong>Device identifier for push notifications</strong> — when you opt in to push, the iOS app sends us a per-device identifier (Apple's APNs token) so our servers can notify you when your share link is first opened. Push tokens are deleted on logout.</li>
       <li><strong>Standard server logs</strong> — IP address, request path, and timestamp for the most recent ~24 hours, used to detect abuse and debug crashes.</li>
@@ -7438,5 +7438,8 @@ try {
 const check = ghl.healthCheck();
 if (check.ok) console.log('[boot] GHL reachable');
 else console.warn('[boot] GHL check failed:', check.reason);
+console.log(require('./lib/r2').isConfigured()
+  ? `[boot] new shared uploads -> R2 bucket ${process.env.R2_BUCKET}`
+  : '[boot] R2 not configured — new uploads go to GHL');
 
 app.listen(PORT, () => console.log(`[boot] listening on :${PORT}`));
