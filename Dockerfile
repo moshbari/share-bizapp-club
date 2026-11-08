@@ -33,7 +33,7 @@ COPY public ./public
 # iframe lives only in the GitHub release zip.
 ARG PDFJS_VERSION=4.7.76
 RUN mkdir -p /app/public/pdfjs \
-    && curl -sL "https://github.com/mozilla/pdf.js/releases/download/v${PDFJS_VERSION}/pdfjs-${PDFJS_VERSION}-dist.zip" -o /tmp/pdfjs.zip \
+    && curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors "https://github.com/mozilla/pdf.js/releases/download/v${PDFJS_VERSION}/pdfjs-${PDFJS_VERSION}-dist.zip" -o /tmp/pdfjs.zip \
     && unzip -q /tmp/pdfjs.zip -d /app/public/pdfjs \
     && rm /tmp/pdfjs.zip \
     && apt-get purge -y unzip && apt-get autoremove -y
